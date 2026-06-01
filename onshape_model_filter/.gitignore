@@ -1,0 +1,9 @@
+.playwright/
+outputs/results/*
+outputs/screenshots/*
+!outputs/results/.gitkeep
+!outputs/screenshots/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
