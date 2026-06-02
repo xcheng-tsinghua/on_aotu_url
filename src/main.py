@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import os
+import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from src.browser.onshape_browser import BrowserClientConfig, BrowserOnshapeClient
 from src.export.result_exporter import ResultExporter
@@ -11,6 +16,11 @@ from src.models.schemas import CandidateResult, PublicCandidate
 from src.parser.feature_tree_parser import FeatureTreeParser
 from src.rules.feature_rule_evaluator import evaluate_candidate_features
 from src.utils.logging_utils import configure_logging
+from src.workflow.inspection_queue import (
+    CandidateQueue,
+    candidate_key,
+    should_continue_inspecting,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,8 +29,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Filter high-quality public Onshape CAD models using browser automation only."
     )
-    parser.add_argument("--max-candidates", type=int, default=100)
-    parser.add_argument("--max-scrolls", type=int, default=30)
+    parser.add_argument(
+        "--target-inspected-count",
+        type=int,
+        default=100,
+        help="Number of validation results to produce in this run.",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=None,
+        help="Deprecated compatibility alias for --max-candidates-buffer.",
+    )
+    parser.add_argument("--max-candidates-buffer", type=int, default=1000)
+    parser.add_argument("--max-scrolls", type=int, default=300)
+    parser.add_argument("--scroll-patience", type=int, default=10)
+    parser.add_argument("--resume", type=_parse_bool, default=True)
+    parser.add_argument("--debug-one-url", type=str, default=None)
     parser.add_argument("--headless", type=_parse_bool, default=False)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/results"))
     parser.add_argument("--timeout-ms", type=int, default=30_000)
@@ -36,77 +61,260 @@ def build_arg_parser() -> argparse.ArgumentParser:
 async def run(args: argparse.Namespace) -> int:
     config = BrowserClientConfig(headless=args.headless, timeout_ms=args.timeout_ms)
     screenshot_dir = Path("outputs/screenshots")
+    feature_artifact_dir = args.output_dir / "feature_artifacts"
     parser = FeatureTreeParser(strict_suppression_detection=True)
-    results: list[CandidateResult] = []
-    candidates: list[PublicCandidate] = []
+    exporter = ResultExporter(args.output_dir)
+    existing_results = exporter.load_existing_results() if args.resume else []
+    results: list[CandidateResult] = list(existing_results)
+    inspected_before_run = {candidate_key(result.url) for result in existing_results}
+    total_public_candidates_collected = 0
+
+    if args.max_candidates is not None:
+        LOGGER.warning(
+            "--max-candidates is deprecated; treating it as --max-candidates-buffer for this run."
+        )
+    max_candidates_buffer = args.max_candidates or args.max_candidates_buffer
 
     async with BrowserOnshapeClient(config) as client:
-        await client.open_onshape()
-        await client.wait_for_login()
+        await client.ensure_logged_in()
+
+        if args.debug_one_url:
+            candidate = PublicCandidate(url=args.debug_one_url)
+            debug_results = await _inspect_candidate(
+                client=client,
+                parser=parser,
+                args=args,
+                candidate=candidate,
+                validation_index=1,
+                screenshot_dir=screenshot_dir,
+                feature_artifact_dir=feature_artifact_dir,
+            )
+            results.extend(debug_results)
+            total_public_candidates_collected = 1
+            exporter.export(results=results, total_public_candidates_collected=1)
+            for result in debug_results:
+                print(json.dumps(result.to_output_dict(), ensure_ascii=False, indent=2))
+            return 0
+
         await client.open_public_page()
-        candidates = await client.collect_public_candidates(
-            max_candidates=args.max_candidates,
-            max_scrolls=args.max_scrolls,
+
+        queue = CandidateQueue(already_inspected_keys=inspected_before_run)
+        inspected_this_run = 0
+        scrolls_used = 0
+        no_new_scrolls = 0
+        validation_index = len(existing_results) + 1
+
+        visible_added = queue.add_candidates(
+            await client.read_visible_public_candidates(),
+            max_buffer=max_candidates_buffer,
         )
+        LOGGER.info("Added %s visible Public candidates to the inspection queue.", visible_added)
 
-        LOGGER.info("Collected %s total public candidates.", len(candidates))
-        for index, candidate in enumerate(candidates, start=1):
-            try:
-                inspections = await client.inspect_candidate(
-                    candidate=candidate,
-                    candidate_index=index,
-                    screenshot_dir=screenshot_dir,
-                    inspect_multiple_part_studios=args.inspect_multiple_part_studios,
-                    max_part_studios_per_document=max(1, args.max_part_studios_per_document),
+        while should_continue_inspecting(
+            inspected_this_run=inspected_this_run,
+            target_inspected_count=args.target_inspected_count,
+        ):
+            if queue.pending_count == 0:
+                await client.open_public_page()
+                added = queue.add_candidates(
+                    await client.read_visible_public_candidates(),
+                    max_buffer=max_candidates_buffer,
                 )
-            except Exception as exc:
-                LOGGER.exception("Candidate inspection failed for %s", candidate.url)
-                inspections = []
-                results.append(
-                    evaluate_candidate_features(
-                        url=candidate.url,
-                        document_name=candidate.document_name,
-                        part_studio_name=None,
-                        features=[],
-                        extraction_reliable=False,
-                        extraction_warnings=[f"candidate inspection failed: {exc}"],
-                        min_active_feature_count=args.min_active_feature_count,
+                if added:
+                    no_new_scrolls = 0
+
+                while (
+                    queue.pending_count == 0
+                    and scrolls_used < args.max_scrolls
+                    and no_new_scrolls < args.scroll_patience
+                ):
+                    changed = await client.scroll_public_list_once()
+                    scrolls_used += 1
+                    await asyncio.sleep(1.0)
+                    added = queue.add_candidates(
+                        await client.read_visible_public_candidates(),
+                        max_buffer=max_candidates_buffer,
                     )
-                )
+                    if added:
+                        LOGGER.info(
+                            "Added %s new candidates after Public scroll %s/%s.",
+                            added,
+                            scrolls_used,
+                            args.max_scrolls,
+                        )
+                        no_new_scrolls = 0
+                        break
+                    no_new_scrolls += 1
+                    LOGGER.info(
+                        "Public scroll %s/%s added no new candidates (patience %s/%s, changed=%s).",
+                        scrolls_used,
+                        args.max_scrolls,
+                        no_new_scrolls,
+                        args.scroll_patience,
+                        changed,
+                    )
 
-            for inspection in inspections:
-                parse_result = parser.parse_feature_tree(inspection.raw_feature_items)
-                warnings = [*inspection.warnings, *parse_result.warnings]
-                result = evaluate_candidate_features(
-                    url=candidate.url,
-                    document_name=candidate.document_name,
-                    part_studio_name=inspection.part_studio_name,
-                    features=parse_result.features,
-                    extraction_reliable=not warnings,
-                    extraction_warnings=warnings,
-                    screenshot_path=inspection.screenshot_path,
-                    min_active_feature_count=args.min_active_feature_count,
-                    allow_suppressed_unsupported=args.allow_suppressed_unsupported,
-                )
-                LOGGER.info("Result for %s: %s - %s", candidate.url, result.status.value, result.reason)
+                if queue.pending_count == 0:
+                    LOGGER.warning(
+                        "Stopping before target: no uninspected candidates remain "
+                        "(inspected_this_run=%s, target=%s, scrolls_used=%s).",
+                        inspected_this_run,
+                        args.target_inspected_count,
+                        scrolls_used,
+                    )
+                    break
+
+            candidate = queue.next_candidate()
+            if candidate is None:
+                continue
+
+            candidate_results = await _inspect_candidate(
+                client=client,
+                parser=parser,
+                args=args,
+                candidate=candidate,
+                validation_index=validation_index,
+                screenshot_dir=screenshot_dir,
+                feature_artifact_dir=feature_artifact_dir,
+            )
+            validation_index += 1
+
+            for result in candidate_results:
+                if not should_continue_inspecting(
+                    inspected_this_run=inspected_this_run,
+                    target_inspected_count=args.target_inspected_count,
+                ):
+                    break
                 results.append(result)
+                inspected_this_run += 1
+                exporter.export(
+                    results=results,
+                    total_public_candidates_collected=queue.unique_seen_count,
+                )
+                LOGGER.info(
+                    "Incrementally saved result %s/%s for %s: %s.",
+                    inspected_this_run,
+                    args.target_inspected_count,
+                    result.url,
+                    result.status.value,
+                )
 
             if args.delay_between_candidates_ms > 0:
                 await asyncio.sleep(args.delay_between_candidates_ms / 1000)
 
-    exporter = ResultExporter(args.output_dir)
+        total_public_candidates_collected = queue.unique_seen_count
+
     paths = exporter.export(
         results=results,
-        total_public_candidates_collected=len(candidates),
+        total_public_candidates_collected=total_public_candidates_collected,
     )
     for name, path in paths.items():
         LOGGER.info("Wrote %s to %s", name, path)
     return 0
 
 
+async def _inspect_candidate(
+    *,
+    client: BrowserOnshapeClient,
+    parser: FeatureTreeParser,
+    args: argparse.Namespace,
+    candidate: PublicCandidate,
+    validation_index: int,
+    screenshot_dir: Path,
+    feature_artifact_dir: Path,
+) -> list[CandidateResult]:
+    try:
+        inspections = await client.inspect_candidate(
+            url=candidate.url,
+            document_name=candidate.document_name,
+            document_id=candidate.document_id,
+            candidate_index=validation_index,
+            screenshot_dir=screenshot_dir,
+            inspect_multiple_part_studios=args.inspect_multiple_part_studios,
+            max_part_studios_per_document=max(1, args.max_part_studios_per_document),
+            feature_artifact_dir=feature_artifact_dir,
+        )
+    except Exception as exc:
+        LOGGER.exception("Candidate inspection failed for %s", candidate.url)
+        return [
+            evaluate_candidate_features(
+                url=candidate.url,
+                document_name=candidate.document_name,
+                part_studio_name=None,
+                features=[],
+                extraction_reliable=False,
+                extraction_warnings=[f"candidate inspection failed: {exc}"],
+                min_active_feature_count=args.min_active_feature_count,
+            )
+        ]
+
+    results: list[CandidateResult] = []
+    for inspection in inspections:
+        parse_result = parser.parse_feature_tree(inspection.raw_feature_items)
+        warnings = [*inspection.warnings, *parse_result.warnings]
+        _write_extracted_features_json(
+            path=inspection.extracted_features_path,
+            inspection=inspection,
+            features=parse_result.features,
+            warnings=warnings,
+        )
+        result = evaluate_candidate_features(
+            url=candidate.url,
+            document_name=candidate.document_name,
+            part_studio_name=inspection.part_studio_name,
+            features=parse_result.features,
+            extraction_reliable=not warnings,
+            extraction_warnings=warnings,
+            screenshot_path=inspection.screenshot_path,
+            min_active_feature_count=args.min_active_feature_count,
+            allow_suppressed_unsupported=args.allow_suppressed_unsupported,
+        )
+        LOGGER.info("Result for %s: %s - %s", candidate.url, result.status.value, result.reason)
+        results.append(result)
+    return results
+
+
+def _write_extracted_features_json(
+    *,
+    path: str | None,
+    inspection: object,
+    features: list[object],
+    warnings: list[str],
+) -> None:
+    if path is None:
+        return
+    feature_path = Path(path)
+    feature_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "url": inspection.candidate.url,
+        "document_name": inspection.candidate.document_name,
+        "part_studio_name": inspection.part_studio_name,
+        "feature_count": len(features),
+        "warnings": warnings,
+        "feature_tree_before_screenshot_path": inspection.feature_tree_before_screenshot_path,
+        "feature_tree_after_screenshot_path": inspection.feature_tree_after_screenshot_path,
+        "features": [feature.model_dump(mode="json") for feature in features],
+    }
+    feature_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> int:
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
     args = build_arg_parser().parse_args()
     configure_logging(verbose=args.verbose)
+    missing = [
+        name
+        for name in ("ONSHAPE_EMAIL", "ONSHAPE_PASSWORD")
+        if not os.getenv(name)
+    ]
+    if missing:
+        print(
+            "Missing required environment variables: "
+            + ", ".join(missing)
+            + ". Add them to .env or your shell environment.",
+            file=sys.stderr,
+        )
+        return 2
     return asyncio.run(run(args))
 
 

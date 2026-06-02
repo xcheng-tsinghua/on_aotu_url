@@ -43,6 +43,29 @@ class ResultExporter:
         )
         return paths
 
+    def load_existing_results(self) -> list[CandidateResult]:
+        results: list[CandidateResult] = []
+        for filename in (
+            "passed_candidates.json",
+            "rejected_candidates.json",
+            "uncertain_candidates.json",
+        ):
+            path = self.output_dir / filename
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                try:
+                    results.append(CandidateResult.model_validate(item))
+                except Exception:
+                    continue
+        return results
+
     def _write_json(self, path: Path, results: list[CandidateResult]) -> None:
         payload = [result.to_output_dict() for result in results]
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -87,6 +87,10 @@ class FeatureTreeParser:
 
         if not features:
             warnings.append("No readable features remained after parsing feature rows.")
+        elif self._looks_like_feature_tree_header_only(features):
+            warnings.append(
+                "Only the feature tree header was extracted; individual features were not read reliably."
+            )
 
         return FeatureTreeParseResult(features=features, warnings=warnings)
 
@@ -159,3 +163,10 @@ class FeatureTreeParser:
         if is_suppressed:
             return True
         return any(entry.get(key) not in (None, "") for key in STATE_EVIDENCE_KEYS)
+
+    @staticmethod
+    def _looks_like_feature_tree_header_only(features: list[Feature]) -> bool:
+        if len(features) != 1:
+            return False
+        text = features[0].raw_text.strip()
+        return bool(re.fullmatch(r"Features\s*\(\d+\)", text, flags=re.IGNORECASE))

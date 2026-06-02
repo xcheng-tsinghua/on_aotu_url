@@ -1,17 +1,20 @@
 # Onshape Public CAD Model Filter
 
-Browser-automation tool for collecting high-quality public CAD models from the Onshape Public model list. It uses Playwright to drive the Onshape web interface, lets the user log in manually, inspects Part Studio feature trees, and exports deterministic rule-based results as JSON and CSV.
+Browser-automation tool for collecting high-quality public CAD models from the Onshape Public model list. It uses Playwright to drive the Onshape web interface, logs in with a configured disposable test account, inspects Part Studio feature trees, and exports deterministic rule-based results as JSON and CSV.
 
 ## What It Does
 
 1. Opens Onshape in a persistent Chromium profile.
-2. Waits for the user to log in manually if no reusable session exists.
-3. Navigates to the Onshape Public documents area.
-4. Scrolls the public model list to collect candidate document links.
-5. Opens each candidate document and inspects Part Studio feature trees.
-6. Parses visible feature rows into structured records.
-7. Applies deterministic whitelist/rejection rules.
-8. Writes passed, rejected, uncertain, CSV, and summary reports.
+2. Loads test-account credentials from `.env`.
+3. Skips login if the browser profile is already authenticated.
+4. Logs in automatically when needed.
+5. Navigates to the Onshape Public documents area.
+6. Scrolls the public model list to maintain a deduplicated candidate queue.
+7. Opens candidates until the target inspected count is reached.
+8. Scrolls each Part Studio feature tree panel to collect all feature rows.
+9. Parses feature rows into structured records.
+10. Applies deterministic whitelist/rejection rules.
+11. Writes passed, rejected, uncertain, CSV, feature artifacts, and summary reports incrementally.
 
 ## Why Browser Automation
 
@@ -28,7 +31,6 @@ The candidate source is the Onshape Public list itself. The tool scrolls that li
 Use Python 3.10+.
 
 ```bash
-cd onshape_model_filter
 pip install -r requirements.txt
 playwright install chromium
 ```
@@ -37,21 +39,34 @@ Optional environment variables can be copied from `.env.example` into your shell
 
 ```bash
 ONSHAPE_BASE_URL=https://cad.onshape.com
+ONSHAPE_EMAIL=
+ONSHAPE_PASSWORD=
 ONSHAPE_PUBLIC_URL=
 ONSHAPE_USER_DATA_DIR=.playwright/onshape_profile
 ```
 
-The code reads environment variables directly. It does not require `python-dotenv`.
+The CLI uses `python-dotenv` to load `.env` automatically.
 
-## Manual Login And Persistent Profile
+## Automated Login And Persistent Profile
 
-The first run should use a visible browser:
+Create a local `.env` file with a disposable test-account login:
 
 ```bash
-python -m src.main --headless false --max-candidates 100 --max-scrolls 30 --output-dir outputs/results
+ONSHAPE_EMAIL=your-test-account@example.com
+ONSHAPE_PASSWORD=your-test-password
 ```
 
-If you are not logged in, Chromium opens the Onshape sign-in page and waits. Log in manually in that browser window. The tool never asks for, types, or stores your password.
+Do not commit `.env`; it is already ignored by `.gitignore`.
+
+Run with a visible browser while debugging:
+
+```bash
+python -m src.main --target-inspected-count 100 --headless false --max-scrolls 300 --output-dir outputs/results
+```
+
+If the persistent browser profile is already logged in, the tool skips credential entry. Otherwise it opens the Onshape sign-in page, fills `ONSHAPE_EMAIL` and `ONSHAPE_PASSWORD`, submits the login form, and waits for the documents page to load.
+
+The password is never printed in logs. If login fails, the tool stops and writes a screenshot to `outputs/screenshots/login_failed.png`.
 
 Playwright stores the browser session under:
 
@@ -59,19 +74,24 @@ Playwright stores the browser session under:
 .playwright/onshape_profile
 ```
 
-Later runs reuse that local profile and can usually skip manual login. Keep this directory private; it contains browser cookies/session state.
+Later runs reuse that local profile and can usually skip login. Keep this directory private; it contains browser cookies/session state.
 
 ## CLI
 
 ```bash
-python -m src.main --max-candidates 100 --max-scrolls 30 --headless false --output-dir outputs/results --timeout-ms 30000 --min-active-feature-count 1 --allow-suppressed-unsupported true --inspect-multiple-part-studios false  --max-part-studios-per-document 1 --delay-between-candidates-ms 2000
+python -m src.main --target-inspected-count 200 --max-scrolls 500 --headless false --output-dir outputs/results --timeout-ms 30000 --scroll-patience 10 --resume true --min-active-feature-count 1 --allow-suppressed-unsupported true --inspect-multiple-part-studios false --max-part-studios-per-document 1 --delay-between-candidates-ms 2000
 ```
 
 Arguments:
 
-- `--max-candidates`: maximum public document candidates to inspect.
+- `--target-inspected-count`: number of validation results to produce in this run; this includes `passed`, `rejected`, and `uncertain`.
+- `--max-candidates-buffer`: maximum uninspected candidate links to keep in memory.
+- `--max-candidates`: deprecated compatibility alias for `--max-candidates-buffer`.
 - `--max-scrolls`: maximum downward scroll actions in the Public list.
-- `--headless`: `true` or `false`; first login requires `false`.
+- `--scroll-patience`: stop collecting after this many consecutive Public-list scrolls add no new candidates.
+- `--resume`: when true, load previous output JSON files and skip already inspected URLs.
+- `--debug-one-url`: inspect one Onshape document URL, save feature-tree artifacts, evaluate it, and print the result.
+- `--headless`: `true` or `false`.
 - `--output-dir`: report output directory.
 - `--timeout-ms`: Playwright timeout for UI waits.
 - `--min-active-feature-count`: reject reliable models with fewer active features.
@@ -103,7 +123,7 @@ Reject when an active, unsuppressed feature is:
 
 Suppressed unsupported features are recorded in the output. By default, they do not reject a model because they do not affect the final model.
 
-If the feature tree cannot be extracted or suppression status cannot be determined reliably, the candidate is marked `uncertain`, not `passed`.
+If the feature tree cannot be extracted completely, or suppression status cannot be determined reliably, the candidate is marked `uncertain`, not `passed`.
 
 ## Outputs
 
@@ -116,6 +136,15 @@ Reports are written to `outputs/results` by default:
 - `summary.json`
 
 Screenshots are written to `outputs/screenshots`.
+
+Per-candidate feature extraction artifacts are written to `outputs/results/feature_artifacts` by default:
+
+- viewport screenshot path is recorded in the candidate result
+- `*_feature_tree_before.png`
+- `*_feature_tree_after.png`
+- `*_extracted_features.json`
+
+The extractor scrolls the left-side feature tree container itself, not the browser page, and deduplicates feature rows while scanning from top to bottom.
 
 `summary.json` includes:
 

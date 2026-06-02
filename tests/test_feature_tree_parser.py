@@ -71,3 +71,12 @@ def test_empty_feature_tree_is_unreliable() -> None:
 
     assert not result.reliable
     assert result.features == []
+
+
+def test_header_only_feature_tree_is_unreliable() -> None:
+    parser = FeatureTreeParser()
+
+    result = parser.parse_feature_tree(["Features (88)"])
+
+    assert not result.reliable
+    assert "Only the feature tree header" in result.warnings[0]

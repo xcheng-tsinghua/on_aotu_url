@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -18,12 +19,15 @@ DOCUMENT_ID_RE = re.compile(r"/documents/([^/?#]+)")
 
 @dataclass(slots=True)
 class BrowserClientConfig:
-    base_url: str = os.getenv("ONSHAPE_BASE_URL", selectors.ONSHAPE_BASE_URL)
-    public_url: str | None = os.getenv("ONSHAPE_PUBLIC_URL") or None
-    user_data_dir: Path = Path(os.getenv("ONSHAPE_USER_DATA_DIR", ".playwright/onshape_profile"))
+    base_url: str = field(default_factory=lambda: os.getenv("ONSHAPE_BASE_URL", selectors.ONSHAPE_BASE_URL))
+    public_url: str | None = field(default_factory=lambda: os.getenv("ONSHAPE_PUBLIC_URL") or None)
+    user_data_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("ONSHAPE_USER_DATA_DIR", ".playwright/onshape_profile"))
+    )
     headless: bool = False
     timeout_ms: int = 30_000
-    manual_login_timeout_ms: int = 15 * 60 * 1000
+    login_timeout_ms: int = 90_000
+    login_failure_screenshot_path: Path = Path("outputs/screenshots/login_failed.png")
 
 
 @dataclass(slots=True)
@@ -33,6 +37,17 @@ class FeatureTreeInspection:
     raw_feature_items: list[dict[str, Any]]
     screenshot_path: str | None
     warnings: list[str]
+    feature_tree_before_screenshot_path: str | None = None
+    feature_tree_after_screenshot_path: str | None = None
+    extracted_features_path: str | None = None
+
+
+@dataclass(slots=True)
+class FeatureTreeExtraction:
+    raw_feature_items: list[dict[str, Any]]
+    warnings: list[str]
+    before_screenshot_path: str | None = None
+    after_screenshot_path: str | None = None
 
 
 class BrowserOnshapeClient:
@@ -70,36 +85,102 @@ class BrowserOnshapeClient:
         await page.goto(urljoin(self.config.base_url, "/documents"), wait_until="domcontentloaded")
         await page.wait_for_load_state("domcontentloaded")
 
-    async def wait_for_login(self) -> None:
+    async def ensure_logged_in(self) -> None:
+        email = os.getenv("ONSHAPE_EMAIL")
+        password = os.getenv("ONSHAPE_PASSWORD")
+        missing = [name for name, value in (("ONSHAPE_EMAIL", email), ("ONSHAPE_PASSWORD", password)) if not value]
+        if missing:
+            raise RuntimeError(
+                "Missing required environment variables: "
+                + ", ".join(missing)
+                + ". Add them to .env or your shell environment."
+            )
+
         page = self._require_page()
+        await page.goto(urljoin(self.config.base_url, "/documents"), wait_until="domcontentloaded")
+        await page.wait_for_load_state("domcontentloaded")
         if await self.is_logged_in():
             LOGGER.info("Onshape login session detected.")
             return
 
-        LOGGER.info("Waiting for manual Onshape login in the browser window.")
+        await self.login(email=email or "", password=password or "")
+
+    async def login(self, email: str, password: str) -> None:
+        if not email or not password:
+            raise RuntimeError("ONSHAPE_EMAIL and ONSHAPE_PASSWORD must both be set before login.")
+
+        page = self._require_page()
+        LOGGER.info("Opening Onshape login page for configured test account.")
         await page.goto(urljoin(self.config.base_url, "/signin"), wait_until="domcontentloaded")
-        await page.wait_for_function(
-            """
-            () => {
-              const url = window.location.href.toLowerCase();
-              const body = document.body ? document.body.innerText.toLowerCase() : "";
-              return !url.includes("/signin") &&
-                (url.includes("/documents") || body.includes("public") || body.includes("my onshape"));
-            }
-            """,
-            timeout=self.config.manual_login_timeout_ms,
-        )
         await page.wait_for_load_state("domcontentloaded")
-        LOGGER.info("Manual login appears complete.")
+
+        if await self.is_logged_in():
+            LOGGER.info("Onshape session became logged in before credential entry.")
+            return
+
+        email_locator = await self._wait_for_first_visible_locator(selectors.LOGIN_EMAIL_SELECTORS)
+        if email_locator is None:
+            await self._save_login_failure_screenshot()
+            raise RuntimeError("Could not find Onshape login email field.")
+
+        LOGGER.info("Entering configured Onshape email.")
+        await email_locator.fill(email)
+
+        password_locator = await self._first_visible_locator(selectors.LOGIN_PASSWORD_SELECTORS)
+        if password_locator is None:
+            continue_locator = await self._first_visible_locator(selectors.LOGIN_CONTINUE_SELECTORS)
+            if continue_locator is None:
+                await email_locator.press("Enter")
+            else:
+                await continue_locator.click()
+            password_locator = await self._wait_for_first_visible_locator(selectors.LOGIN_PASSWORD_SELECTORS)
+
+        if password_locator is None:
+            await self._save_login_failure_screenshot()
+            raise RuntimeError("Could not find Onshape login password field after submitting email.")
+
+        LOGGER.info("Entering configured Onshape password; password is not logged.")
+        await password_locator.fill(password)
+
+        submit_locator = await self._first_visible_locator(selectors.LOGIN_SUBMIT_SELECTORS)
+        if submit_locator is None:
+            await password_locator.press("Enter")
+        else:
+            await submit_locator.click()
+
+        try:
+            await self._wait_for_login_success_or_failure()
+        except Exception as exc:
+            await self._save_login_failure_screenshot()
+            error_text = await self._visible_login_error_text()
+            suffix = f" Visible login error: {error_text}" if error_text else ""
+            raise RuntimeError(f"Onshape login did not complete successfully.{suffix}") from exc
+
+        if not await self._wait_until_logged_in(timeout_ms=30_000):
+            await self._save_login_failure_screenshot()
+            error_text = await self._visible_login_error_text()
+            suffix = f" Visible login error: {error_text}" if error_text else ""
+            raise RuntimeError(f"Onshape login failed.{suffix}")
+
+        LOGGER.info("Onshape automated login succeeded.")
 
     async def is_logged_in(self) -> bool:
         page = self._require_page()
         current_url = page.url.lower()
         if "/signin" in current_url or "/login" in current_url:
-            return False
-        if "/documents" in current_url:
+            if await self._first_visible_locator(selectors.LOGIN_PASSWORD_SELECTORS) is not None:
+                return False
+
+        body_text = await self._visible_body_text()
+        has_logged_in_text = any(
+            token in body_text
+            for token in ("owned by me", "recently opened", "created by me", "public", "shared with me")
+        )
+        if "/documents" in current_url and has_logged_in_text:
             return True
-        return await self._any_selector_visible(selectors.PUBLIC_TAB_SELECTORS)
+        if "/documents" in current_url and await self._any_selector_visible(selectors.LOGGED_IN_SURFACE_SELECTORS):
+            return True
+        return await self._any_selector_visible(selectors.LOGGED_IN_SURFACE_SELECTORS)
 
     async def open_public_page(self) -> None:
         page = self._require_page()
@@ -111,10 +192,10 @@ class BrowserOnshapeClient:
 
         LOGGER.info("Opening Onshape documents page and selecting the Public tab.")
         await page.goto(urljoin(self.config.base_url, "/documents"), wait_until="domcontentloaded")
-        await self._wait_for_document_surface()
+        await self._wait_for_documents_home()
 
         for selector in selectors.PUBLIC_TAB_SELECTORS:
-            locator = page.locator(selector).first()
+            locator = page.locator(selector).first
             try:
                 if await locator.count() and await locator.is_visible():
                     await locator.click()
@@ -129,12 +210,7 @@ class BrowserOnshapeClient:
             "ONSHAPE_PUBLIC_URL to a stable public-documents page."
         )
 
-    async def collect_public_candidates(
-        self,
-        *,
-        max_candidates: int,
-        max_scrolls: int,
-    ) -> list[PublicCandidate]:
+    async def collect_public_candidates(self, max_candidates: int, max_scrolls: int) -> list[PublicCandidate]:
         page = self._require_page()
         seen: dict[str, PublicCandidate] = {}
 
@@ -154,23 +230,36 @@ class BrowserOnshapeClient:
             if len(seen) >= max_candidates or scroll_index >= max_scrolls:
                 break
 
-            await self._scroll_public_list()
+            await self.scroll_public_list_once()
             await page.wait_for_timeout(1500)
 
         return list(seen.values())[:max_candidates]
 
+    async def read_visible_public_candidates(self) -> list[PublicCandidate]:
+        return await self._read_visible_document_links()
+
+    async def scroll_public_list_once(self) -> bool:
+        return await self._scroll_public_list()
+
     async def inspect_candidate(
         self,
         *,
-        candidate: PublicCandidate,
+        url: str,
+        document_name: str | None = None,
+        document_id: str | None = None,
         candidate_index: int,
         screenshot_dir: str | Path,
         inspect_multiple_part_studios: bool,
         max_part_studios_per_document: int,
+        feature_artifact_dir: str | Path | None = None,
     ) -> list[FeatureTreeInspection]:
         page = self._require_page()
         screenshot_dir = Path(screenshot_dir)
         screenshot_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir = Path(feature_artifact_dir) if feature_artifact_dir is not None else None
+        if artifact_dir is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        candidate = PublicCandidate(url=url, document_name=document_name, document_id=document_id or _document_id(url))
 
         LOGGER.info("Inspecting Onshape candidate: %s", candidate.url)
         await page.goto(candidate.url, wait_until="domcontentloaded")
@@ -186,13 +275,29 @@ class BrowserOnshapeClient:
                 candidate_index=candidate_index,
                 part_index=1,
             )
+            extraction = await self.extract_feature_tree(
+                artifact_prefix=self._feature_artifact_prefix(
+                    artifact_dir=artifact_dir,
+                    candidate=candidate,
+                    candidate_index=candidate_index,
+                    part_index=1,
+                )
+            )
             return [
                 FeatureTreeInspection(
                     candidate=candidate,
                     part_studio_name=None,
-                    raw_feature_items=await self.extract_feature_tree_items(),
+                    raw_feature_items=extraction.raw_feature_items,
                     screenshot_path=screenshot_path,
-                    warnings=[warning],
+                    warnings=extraction.warnings if extraction.raw_feature_items else [warning, *extraction.warnings],
+                    feature_tree_before_screenshot_path=extraction.before_screenshot_path,
+                    feature_tree_after_screenshot_path=extraction.after_screenshot_path,
+                    extracted_features_path=self._extracted_features_path(
+                        artifact_dir=artifact_dir,
+                        candidate=candidate,
+                        candidate_index=candidate_index,
+                        part_index=1,
+                    ),
                 )
             ]
 
@@ -217,21 +322,187 @@ class BrowserOnshapeClient:
                 candidate_index=candidate_index,
                 part_index=part_index + 1,
             )
-            raw_items = await self.extract_feature_tree_items()
-            warnings = [] if raw_items else ["No feature tree rows were extracted from the page."]
+            extraction = await self.extract_feature_tree(
+                artifact_prefix=self._feature_artifact_prefix(
+                    artifact_dir=artifact_dir,
+                    candidate=candidate,
+                    candidate_index=candidate_index,
+                    part_index=part_index + 1,
+                )
+            )
+            warnings = extraction.warnings if extraction.raw_feature_items else [
+                "No feature tree rows were extracted from the page.",
+                *extraction.warnings,
+            ]
             inspections.append(
                 FeatureTreeInspection(
                     candidate=candidate,
                     part_studio_name=part_studio_name,
-                    raw_feature_items=raw_items,
+                    raw_feature_items=extraction.raw_feature_items,
                     screenshot_path=screenshot_path,
                     warnings=warnings,
+                    feature_tree_before_screenshot_path=extraction.before_screenshot_path,
+                    feature_tree_after_screenshot_path=extraction.after_screenshot_path,
+                    extracted_features_path=self._extracted_features_path(
+                        artifact_dir=artifact_dir,
+                        candidate=candidate,
+                        candidate_index=candidate_index,
+                        part_index=part_index + 1,
+                    ),
                 )
             )
 
         return inspections
 
     async def extract_feature_tree_items(self, max_items: int = 500) -> list[dict[str, Any]]:
+        extraction = await self.extract_feature_tree(max_items=max_items)
+        return extraction.raw_feature_items
+
+    async def extract_feature_tree(
+        self,
+        *,
+        max_items: int = 2000,
+        max_scroll_steps: int = 300,
+        scroll_patience: int = 4,
+        artifact_prefix: Path | None = None,
+    ) -> FeatureTreeExtraction:
+        page = self._require_page()
+        container = await self._feature_tree_scroll_container()
+        warnings: list[str] = []
+        before_screenshot_path: str | None = None
+        after_screenshot_path: str | None = None
+
+        if container is None:
+            warnings.append(
+                "Could not locate the feature tree scroll container; extraction may be incomplete."
+            )
+            return FeatureTreeExtraction(
+                raw_feature_items=await self._read_visible_feature_tree_items(max_items=max_items),
+                warnings=warnings,
+            )
+
+        try:
+            await container.evaluate("(el) => { el.scrollTop = 0; }")
+            await self._wheel_feature_tree(container, delta_y=-1200, repetitions=10)
+            await page.wait_for_timeout(300)
+        except Exception as exc:  # pragma: no cover - UI-specific fallback
+            warnings.append(f"Could not reset feature tree scroll position: {exc}")
+
+        expected_feature_count = await self._expected_user_feature_count()
+        if expected_feature_count is not None:
+            LOGGER.info("Expecting %s user feature rows from the feature tree.", expected_feature_count)
+
+        if artifact_prefix is not None:
+            before_screenshot_path = await self._take_locator_screenshot(
+                container,
+                artifact_prefix.with_name(f"{artifact_prefix.name}_feature_tree_before.png"),
+            )
+
+        seen: dict[str, dict[str, Any]] = {}
+        no_new_steps = 0
+        reached_bottom = False
+
+        for _ in range(max_scroll_steps):
+            visible_items = await self._read_visible_feature_tree_items(max_items=max_items)
+            added = 0
+            for item in visible_items:
+                key = _feature_row_key(item)
+                if key in seen:
+                    continue
+                item["extraction_order"] = len(seen) + 1
+                seen[key] = item
+                added += 1
+
+            if len(seen) >= max_items:
+                warnings.append(f"Stopped feature extraction after reaching max_items={max_items}.")
+                break
+            if expected_feature_count is not None and len(seen) >= expected_feature_count:
+                reached_bottom = True
+                break
+
+            metrics = await self._scroll_metrics(container)
+            can_use_native_scroll = (
+                metrics is not None
+                and metrics["scroll_height"] > metrics["client_height"] + 2
+            )
+            reached_bottom = bool(
+                can_use_native_scroll
+                and metrics is not None
+                and metrics["scroll_top"] + metrics["client_height"] >= metrics["scroll_height"] - 2
+            )
+            if reached_bottom:
+                break
+
+            no_new_steps = 0 if added else no_new_steps + 1
+            if no_new_steps >= scroll_patience:
+                warnings.append(
+                    "Feature tree scrolling stopped before reaching the bottom after repeated scrolls "
+                    "with no newly extracted rows."
+                )
+                break
+
+            if can_use_native_scroll and metrics is not None:
+                previous_scroll_top = metrics["scroll_top"]
+                try:
+                    await container.evaluate(
+                        """
+                        (el) => {
+                          const delta = Math.max(Math.floor(el.clientHeight * 0.85), 180);
+                          el.scrollTop = Math.min(el.scrollTop + delta, el.scrollHeight);
+                        }
+                        """
+                    )
+                    await page.wait_for_timeout(250)
+                except Exception as exc:  # pragma: no cover - UI-specific fallback
+                    warnings.append(f"Could not scroll feature tree container: {exc}")
+                    break
+
+                next_metrics = await self._scroll_metrics(container)
+                if next_metrics is None:
+                    warnings.append("Could not verify feature tree scroll movement.")
+                    break
+                if abs(next_metrics["scroll_top"] - previous_scroll_top) < 1:
+                    await self._wheel_feature_tree(container, delta_y=600, repetitions=1)
+            else:
+                await self._wheel_feature_tree(container, delta_y=600, repetitions=1)
+
+        if not reached_bottom:
+            final_metrics = await self._scroll_metrics(container)
+            if expected_feature_count is not None and len(seen) >= expected_feature_count:
+                reached_bottom = True
+            elif (
+                final_metrics is not None
+                and final_metrics["scroll_height"] > final_metrics["client_height"] + 2
+            ):
+                reached_bottom = (
+                    final_metrics["scroll_top"] + final_metrics["client_height"]
+                    >= final_metrics["scroll_height"] - 2
+                )
+            if not reached_bottom:
+                if expected_feature_count is not None:
+                    warnings.append(
+                        f"Feature tree extraction incomplete: expected {expected_feature_count} "
+                        f"features from the header but extracted {len(seen)}."
+                    )
+                elif not any("Feature tree" in warning for warning in warnings):
+                    warnings.append("Feature tree bottom was not reached; extraction is incomplete.")
+
+        if artifact_prefix is not None:
+            after_screenshot_path = await self._take_locator_screenshot(
+                container,
+                artifact_prefix.with_name(f"{artifact_prefix.name}_feature_tree_after.png"),
+            )
+
+        items = sorted(seen.values(), key=lambda item: int(item.get("extraction_order") or 0))
+        LOGGER.info("Extracted %s feature tree rows after scrolling.", len(items))
+        return FeatureTreeExtraction(
+            raw_feature_items=items,
+            warnings=warnings,
+            before_screenshot_path=before_screenshot_path,
+            after_screenshot_path=after_screenshot_path,
+        )
+
+    async def _read_visible_feature_tree_items(self, max_items: int) -> list[dict[str, Any]]:
         page = self._require_page()
         for selector in selectors.FEATURE_TREE_ITEM_SELECTORS:
             locator = page.locator(selector)
@@ -265,7 +536,11 @@ class BrowserOnshapeClient:
                             class_name: el.getAttribute('class') || '',
                             style: el.getAttribute('style') || '',
                             child_labels: childLabels,
-                            attributes: attrs
+                            attributes: attrs,
+                            dom_id: el.getAttribute('id') || '',
+                            data_feature_id: el.getAttribute('data-feature-id') || '',
+                            data_node_id: el.getAttribute('data-node-id') || '',
+                            y_position: Math.round(el.getBoundingClientRect().top)
                           };
                         }
                         """
@@ -313,19 +588,26 @@ class BrowserOnshapeClient:
                 LOGGER.debug("Could not read document link %s: %s", index + 1, exc)
         return candidates
 
-    async def _scroll_public_list(self) -> None:
+    async def _scroll_public_list(self) -> bool:
         page = self._require_page()
         for selector in selectors.PUBLIC_LIST_CONTAINER_SELECTORS:
-            locator = page.locator(selector).first()
+            locator = page.locator(selector).first
             try:
                 if await locator.count() and await locator.is_visible():
-                    await locator.evaluate(
-                        "(el) => el.scrollBy({top: Math.max(el.clientHeight, 800), behavior: 'instant'})"
+                    changed = await locator.evaluate(
+                        """
+                        (el) => {
+                          const before = el.scrollTop;
+                          el.scrollBy({top: Math.max(el.clientHeight, 800), behavior: 'instant'});
+                          return Math.abs(el.scrollTop - before) > 1;
+                        }
+                        """
                     )
-                    return
+                    return bool(changed)
             except Exception:  # pragma: no cover - UI-specific fallback
                 continue
         await page.mouse.wheel(0, 1200)
+        return True
 
     async def _wait_for_document_surface(self) -> None:
         page = self._require_page()
@@ -336,9 +618,77 @@ class BrowserOnshapeClient:
             LOGGER.debug("Document link wait timed out: %s", exc)
 
         try:
-            await page.locator("text=/Public/i").first().wait_for(timeout=5000)
+            await page.locator("text=/Public/i").first.wait_for(timeout=5000)
         except Exception as exc:  # pragma: no cover - UI-specific fallback
             LOGGER.debug("Public text wait timed out: %s", exc)
+
+    async def _wait_for_documents_home(self) -> None:
+        page = self._require_page()
+        try:
+            await page.wait_for_function(
+                """
+                () => {
+                  const body = document.body ? document.body.innerText.toLowerCase() : "";
+                  return body.includes("owned by me") ||
+                    body.includes("recently opened") ||
+                    body.includes("created by me") ||
+                    body.includes("public");
+                }
+                """,
+                timeout=min(self.config.timeout_ms, 20_000),
+            )
+        except Exception as exc:  # pragma: no cover - UI-specific fallback
+            LOGGER.debug("Documents home wait timed out: %s", exc)
+
+    async def _wait_for_login_success_or_failure(self) -> None:
+        page = self._require_page()
+        await page.wait_for_function(
+            """
+            () => {
+              const url = window.location.href.toLowerCase();
+              const body = document.body ? document.body.innerText.toLowerCase() : "";
+              const hasPassword = !!document.querySelector('input[type="password"]');
+              const loginFailed = /invalid|incorrect|failed|try again|captcha|two-factor|two factor/.test(body);
+              const loggedInUrl = url.includes('/documents');
+              const loggedInText = /my onshape|recently opened|created by me|public/.test(body);
+              return loginFailed || (!hasPassword && (loggedInUrl || loggedInText));
+            }
+            """,
+            timeout=self.config.login_timeout_ms,
+        )
+        await page.wait_for_load_state("domcontentloaded")
+
+    async def _wait_until_logged_in(self, timeout_ms: int) -> bool:
+        page = self._require_page()
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if await self.is_logged_in():
+                return True
+            await page.wait_for_timeout(500)
+        return False
+
+    async def _visible_login_error_text(self) -> str | None:
+        page = self._require_page()
+        for selector in selectors.LOGIN_ERROR_SELECTORS:
+            locator = page.locator(selector).first
+            try:
+                if await locator.count() and await locator.is_visible():
+                    text = (await locator.inner_text()).strip()
+                    if text:
+                        return re.sub(r"\s+", " ", text)[:300]
+            except Exception:  # pragma: no cover - UI-specific fallback
+                continue
+        return None
+
+    async def _save_login_failure_screenshot(self) -> None:
+        page = self._require_page()
+        path = self.config.login_failure_screenshot_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await page.screenshot(path=str(path), full_page=True)
+            LOGGER.error("Saved Onshape login failure screenshot to %s", path)
+        except Exception as exc:  # pragma: no cover - UI-specific fallback
+            LOGGER.warning("Could not save Onshape login failure screenshot: %s", exc)
 
     async def _wait_for_model_surface(self) -> None:
         page = self._require_page()
@@ -362,6 +712,70 @@ class BrowserOnshapeClient:
                 return locator, count
         return None, 0
 
+    async def _feature_tree_scroll_container(self) -> Any | None:
+        return await self._first_visible_locator(selectors.FEATURE_TREE_SCROLL_CONTAINER_SELECTORS)
+
+    async def _expected_user_feature_count(self) -> int | None:
+        page = self._require_page()
+        try:
+            text = await page.locator("#feature-list .features-title").first.inner_text(timeout=2000)
+        except Exception:  # pragma: no cover - UI-specific fallback
+            try:
+                text = await page.locator("text=/Features\\s*\\(\\d+\\)/").first.inner_text(timeout=2000)
+            except Exception:
+                return None
+        match = re.search(r"Features\s*\((\d+)\)", text)
+        if not match:
+            return None
+
+        total_feature_rows = int(match.group(1))
+        default_geometry_rows = 0
+        try:
+            default_rows = page.locator("#feature-list .os-list-item.ns-default-feature")
+            count = await default_rows.count()
+            for index in range(count):
+                row_text = (await default_rows.nth(index).inner_text()).strip()
+                if row_text and not re.fullmatch(r"Default geometry", row_text, flags=re.IGNORECASE):
+                    default_geometry_rows += 1
+        except Exception:  # pragma: no cover - UI-specific fallback
+            default_geometry_rows = 0
+
+        LOGGER.info(
+            "Feature tree header reports %s total rows; excluding %s default geometry rows.",
+            total_feature_rows,
+            default_geometry_rows,
+        )
+        return max(total_feature_rows - default_geometry_rows, 0)
+
+    async def _wheel_feature_tree(self, locator: Any, *, delta_y: int, repetitions: int) -> None:
+        try:
+            await locator.hover()
+        except Exception:  # pragma: no cover - UI-specific fallback
+            pass
+        page = self._require_page()
+        for _ in range(repetitions):
+            await page.mouse.wheel(0, delta_y)
+            await page.wait_for_timeout(80)
+
+    async def _scroll_metrics(self, locator: Any) -> dict[str, float] | None:
+        try:
+            metrics = await locator.evaluate(
+                """
+                (el) => ({
+                  scroll_top: el.scrollTop,
+                  client_height: el.clientHeight,
+                  scroll_height: el.scrollHeight
+                })
+                """
+            )
+        except Exception:  # pragma: no cover - UI-specific fallback
+            return None
+        return {
+            "scroll_top": float(metrics.get("scroll_top", 0)),
+            "client_height": float(metrics.get("client_height", 0)),
+            "scroll_height": float(metrics.get("scroll_height", 0)),
+        }
+
     async def _take_candidate_screenshot(
         self,
         *,
@@ -380,6 +794,46 @@ class BrowserOnshapeClient:
             LOGGER.warning("Could not save screenshot for %s: %s", candidate.url, exc)
             return None
 
+    async def _take_locator_screenshot(self, locator: Any, path: Path) -> str | None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await locator.screenshot(path=str(path))
+            return str(path)
+        except Exception as exc:  # pragma: no cover - UI-specific fallback
+            LOGGER.warning("Could not save feature tree screenshot to %s: %s", path, exc)
+            return None
+
+    def _feature_artifact_prefix(
+        self,
+        *,
+        artifact_dir: Path | None,
+        candidate: PublicCandidate,
+        candidate_index: int,
+        part_index: int,
+    ) -> Path | None:
+        if artifact_dir is None:
+            return None
+        safe_name = _safe_filename(candidate.document_name or candidate.document_id or "candidate")
+        return artifact_dir / f"{candidate_index:04d}_part{part_index}_{safe_name}"
+
+    def _extracted_features_path(
+        self,
+        *,
+        artifact_dir: Path | None,
+        candidate: PublicCandidate,
+        candidate_index: int,
+        part_index: int,
+    ) -> str | None:
+        prefix = self._feature_artifact_prefix(
+            artifact_dir=artifact_dir,
+            candidate=candidate,
+            candidate_index=candidate_index,
+            part_index=part_index,
+        )
+        if prefix is None:
+            return None
+        return str(prefix.with_name(f"{prefix.name}_extracted_features.json"))
+
     async def _safe_locator_label(self, locator: Any) -> str | None:
         for getter in (
             lambda: locator.inner_text(),
@@ -395,15 +849,43 @@ class BrowserOnshapeClient:
         return None
 
     async def _any_selector_visible(self, selector_values: tuple[str, ...]) -> bool:
+        return await self._first_visible_locator(selector_values) is not None
+
+    async def _first_visible_locator(self, selector_values: tuple[str, ...]) -> Any | None:
         page = self._require_page()
         for selector in selector_values:
             try:
-                locator = page.locator(selector).first()
-                if await locator.count() and await locator.is_visible():
-                    return True
+                locators = page.locator(selector)
+                count = min(await locators.count(), 25)
+                for index in range(count):
+                    locator = locators.nth(index)
+                    if await locator.is_visible():
+                        return locator
             except Exception:  # pragma: no cover - UI-specific fallback
                 continue
-        return False
+        return None
+
+    async def _visible_body_text(self) -> str:
+        page = self._require_page()
+        try:
+            text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        except Exception:  # pragma: no cover - UI-specific fallback
+            return ""
+        return re.sub(r"\s+", " ", str(text)).strip().lower()
+
+    async def _wait_for_first_visible_locator(
+        self,
+        selector_values: tuple[str, ...],
+        timeout_ms: int | None = None,
+    ) -> Any | None:
+        page = self._require_page()
+        deadline = time.monotonic() + (timeout_ms or self.config.timeout_ms) / 1000
+        while time.monotonic() < deadline:
+            locator = await self._first_visible_locator(selector_values)
+            if locator is not None:
+                return locator
+            await page.wait_for_timeout(250)
+        return None
 
     def _require_page(self) -> Any:
         if self.page is None:
@@ -429,3 +911,18 @@ def _normalize_url(url: str) -> str:
 def _safe_filename(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
     return safe[:80] or "candidate"
+
+
+def _feature_row_key(item: dict[str, Any]) -> str:
+    attributes = item.get("attributes") or {}
+    if isinstance(attributes, dict):
+        for key in ("id", "data-feature-id", "data-node-id", "data-id"):
+            value = attributes.get(key)
+            if value:
+                return f"{key}:{value}"
+    for key in ("dom_id", "data_feature_id", "data_node_id"):
+        value = item.get(key)
+        if value:
+            return f"{key}:{value}"
+    text = re.sub(r"\s+", " ", str(item.get("raw_text") or "")).strip().lower()
+    return f"text:{text}"
