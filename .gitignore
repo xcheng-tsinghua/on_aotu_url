@@ -1,6 +1,5 @@
 .playwright/
-outputs/results/*
-outputs/screenshots/*
+outputs/
 !outputs/results/.gitkeep
 !outputs/screenshots/.gitkeep
 __pycache__/
