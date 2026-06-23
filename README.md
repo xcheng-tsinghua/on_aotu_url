@@ -8,8 +8,8 @@ Browser-automation tool for collecting high-quality public CAD models from the O
 2. Loads test-account credentials from `.env`.
 3. Skips login if the browser profile is already authenticated.
 4. Logs in automatically when needed.
-5. Navigates to the Onshape Public documents area.
-6. Scrolls the public model list to maintain a deduplicated candidate queue.
+5. Uses candidate links from `--candidates-json` when provided; otherwise navigates to the Onshape Public documents area.
+6. Scrolls the public model list to maintain a deduplicated candidate queue when no JSON file is provided.
 7. Opens candidates until the target inspected count is reached.
 8. Records the opened Part Studio URL after Onshape fills the element id (`/e/...`).
 9. Scrolls each Part Studio feature tree panel to collect all feature rows.
@@ -65,6 +65,12 @@ Run with a visible browser while debugging:
 python -m src.main --target-inspected-count 100 --headless false --max-scrolls 300 --output-dir outputs/results
 ```
 
+Run from a local candidate-link JSON file instead of the Public tab:
+
+```bash
+python -m src.main --candidates-json candidates.json --target-inspected-count 100 --headless false --output-dir outputs/results
+```
+
 If the persistent browser profile is already logged in, the tool skips credential entry. Otherwise it opens the Onshape sign-in page, fills `ONSHAPE_EMAIL` and `ONSHAPE_PASSWORD`, submits the login form, and waits for the documents page to load.
 
 The password is never printed in logs. If login fails, the tool stops and writes a screenshot to `outputs/screenshots/login_failed.png`.
@@ -92,6 +98,7 @@ Arguments:
 - `--scroll-patience`: stop collecting after this many consecutive Public-list scrolls add no new candidates.
 - `--resume`: when true, load previous output JSON files and skip already inspected URLs.
 - `--debug-one-url`: inspect one Onshape document URL, save feature-tree artifacts, evaluate it, and print the result.
+- `--candidates-json`: read candidate document or Part Studio links from a JSON file after login, instead of opening the Public tab.
 - `--headless`: `true` or `false`.
 - `--output-dir`: report output directory.
 - `--timeout-ms`: Playwright timeout for UI waits.
@@ -150,6 +157,17 @@ Per-candidate feature extraction artifacts are written to `outputs/results/featu
 - `*_extracted_features.json`
 
 The extractor scrolls the left-side feature tree container itself, not the browser page, and deduplicates feature rows while scanning from top to bottom.
+
+Candidate JSON files can be a list of URL strings:
+
+```json
+[
+  "https://cad.onshape.com/documents/{did}/w/{wid}",
+  "https://cad.onshape.com/documents/{did}/w/{wid}/e/{eid}"
+]
+```
+
+They can also be an object with `candidates` or `urls`; object entries may include `url`, `document_name`, and `document_id`.
 
 `summary.json` includes:
 

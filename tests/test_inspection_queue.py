@@ -56,3 +56,33 @@ def test_candidate_queue_skips_resume_keys() -> None:
 
     assert added == 1
     assert queue.next_candidate().url.endswith("/doc2/w/workspace1")
+
+
+def test_element_key_mode_keeps_distinct_elements_in_same_document() -> None:
+    queue = CandidateQueue(key_mode="element")
+    added = queue.add_candidates(
+        [
+            PublicCandidate(url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element1"),
+            PublicCandidate(url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element2"),
+            PublicCandidate(url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element1"),
+        ],
+        max_buffer=10,
+    )
+
+    assert added == 2
+    assert queue.next_candidate().url.endswith("/element1")
+    assert queue.next_candidate().url.endswith("/element2")
+
+
+def test_document_key_mode_still_dedupes_by_document() -> None:
+    assert (
+        candidate_key("https://cad.onshape.com/documents/doc1/w/workspace1/e/element1")
+        == "document:doc1"
+    )
+    assert (
+        candidate_key(
+            "https://cad.onshape.com/documents/doc1/w/workspace1/e/element1",
+            key_mode="element",
+        )
+        == "element:doc1:w:workspace1:e:element1"
+    )

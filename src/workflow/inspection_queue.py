@@ -8,10 +8,21 @@ from urllib.parse import urlsplit, urlunsplit
 from src.models.schemas import PublicCandidate
 
 DOCUMENT_ID_RE = re.compile(r"/documents/([^/?#]+)")
+DOCUMENT_WORKSPACE_ELEMENT_RE = re.compile(
+    r"/documents/([^/?#]+)(?:/w/([^/?#]+))?(?:/e/([^/?#]+))?"
+)
 
 
 class CandidateQueue:
-    def __init__(self, already_inspected_keys: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        already_inspected_keys: Iterable[str] = (),
+        *,
+        key_mode: str = "document",
+    ) -> None:
+        if key_mode not in {"document", "element"}:
+            raise ValueError(f"Unsupported candidate key mode: {key_mode}")
+        self.key_mode = key_mode
         self._seen_keys: set[str] = set(already_inspected_keys)
         self._pending: deque[PublicCandidate] = deque()
 
@@ -33,7 +44,7 @@ class CandidateQueue:
         for candidate in candidates:
             if len(self._pending) >= max_buffer:
                 break
-            key = candidate_key(candidate)
+            key = candidate_key(candidate, key_mode=self.key_mode)
             if key in self._seen_keys:
                 continue
             self._seen_keys.add(key)
@@ -47,13 +58,29 @@ class CandidateQueue:
         return self._pending.popleft()
 
 
-def candidate_key(candidate_or_url: PublicCandidate | str) -> str:
+def candidate_key(candidate_or_url: PublicCandidate | str, *, key_mode: str = "document") -> str:
+    if key_mode not in {"document", "element"}:
+        raise ValueError(f"Unsupported candidate key mode: {key_mode}")
+
     if isinstance(candidate_or_url, PublicCandidate):
-        if candidate_or_url.document_id:
-            return f"document:{candidate_or_url.document_id}"
         url = candidate_or_url.url
+        document_id = candidate_or_url.document_id
     else:
         url = candidate_or_url
+        document_id = None
+
+    match = DOCUMENT_WORKSPACE_ELEMENT_RE.search(url)
+    if match:
+        document, workspace, element = match.groups()
+        if key_mode == "element":
+            if document and workspace and element:
+                return f"element:{document}:w:{workspace}:e:{element}"
+            if document and workspace:
+                return f"workspace:{document}:w:{workspace}"
+        return f"document:{document}"
+
+    if document_id:
+        return f"document:{document_id}"
 
     match = DOCUMENT_ID_RE.search(url)
     if match:

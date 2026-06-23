@@ -46,6 +46,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scroll-patience", type=int, default=10)
     parser.add_argument("--resume", type=_parse_bool, default=True)
     parser.add_argument("--debug-one-url", type=str, default=None)
+    parser.add_argument(
+        "--candidates-json",
+        "--candidate-json",
+        type=Path,
+        default=None,
+        help="Optional JSON file containing candidate Onshape document or Part Studio URLs.",
+    )
     parser.add_argument("--headless", type=_parse_bool, default=False)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/results"))
     parser.add_argument("--timeout-ms", type=int, default=30_000)
@@ -66,7 +73,8 @@ async def run(args: argparse.Namespace) -> int:
     exporter = ResultExporter(args.output_dir)
     existing_results = exporter.load_existing_results() if args.resume else []
     results: list[CandidateResult] = list(existing_results)
-    inspected_before_run = {candidate_key(result.url) for result in existing_results}
+    key_mode = "element" if args.candidates_json else "document"
+    inspected_before_run = {candidate_key(result.url, key_mode=key_mode) for result in existing_results}
     total_public_candidates_collected = 0
 
     if args.max_candidates is not None:
@@ -94,6 +102,77 @@ async def run(args: argparse.Namespace) -> int:
             exporter.export(results=results, total_public_candidates_collected=1)
             for result in debug_results:
                 print(json.dumps(result.to_output_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        if args.candidates_json:
+            file_candidates = _load_candidates_from_json(args.candidates_json)
+            queue = CandidateQueue(already_inspected_keys=inspected_before_run, key_mode="element")
+            added = queue.add_candidates(file_candidates, max_buffer=len(file_candidates))
+            total_public_candidates_collected = len(file_candidates)
+            LOGGER.info(
+                "Loaded %s candidates from %s; queued %s after dedupe/resume filtering.",
+                len(file_candidates),
+                args.candidates_json,
+                added,
+            )
+            inspected_this_run = 0
+            validation_index = len(existing_results) + 1
+
+            while should_continue_inspecting(
+                inspected_this_run=inspected_this_run,
+                target_inspected_count=args.target_inspected_count,
+            ):
+                candidate = queue.next_candidate()
+                if candidate is None:
+                    LOGGER.warning(
+                        "Stopping before target: no uninspected candidates remain in %s "
+                        "(inspected_this_run=%s, target=%s).",
+                        args.candidates_json,
+                        inspected_this_run,
+                        args.target_inspected_count,
+                    )
+                    break
+
+                candidate_results = await _inspect_candidate(
+                    client=client,
+                    parser=parser,
+                    args=args,
+                    candidate=candidate,
+                    validation_index=validation_index,
+                    screenshot_dir=screenshot_dir,
+                    feature_artifact_dir=feature_artifact_dir,
+                )
+                validation_index += 1
+
+                for result in candidate_results:
+                    if not should_continue_inspecting(
+                        inspected_this_run=inspected_this_run,
+                        target_inspected_count=args.target_inspected_count,
+                    ):
+                        break
+                    results.append(result)
+                    inspected_this_run += 1
+                    exporter.export(
+                        results=results,
+                        total_public_candidates_collected=total_public_candidates_collected,
+                    )
+                    LOGGER.info(
+                        "Incrementally saved JSON-file result %s/%s for %s: %s.",
+                        inspected_this_run,
+                        args.target_inspected_count,
+                        result.url,
+                        result.status.value,
+                    )
+
+                if args.delay_between_candidates_ms > 0 and queue.pending_count > 0:
+                    await asyncio.sleep(args.delay_between_candidates_ms / 1000)
+
+            paths = exporter.export(
+                results=results,
+                total_public_candidates_collected=total_public_candidates_collected,
+            )
+            for name, path in paths.items():
+                LOGGER.info("Wrote %s to %s", name, path)
             return 0
 
         await client.open_public_page()
@@ -300,10 +379,71 @@ def _write_extracted_features_json(
     feature_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_candidates_from_json(path: Path) -> list[PublicCandidate]:
+    if not path.exists():
+        raise RuntimeError(f"Candidate JSON file not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Candidate JSON file is not valid JSON: {path}") from exc
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("candidates"), list):
+            entries = payload["candidates"]
+        elif isinstance(payload.get("urls"), list):
+            entries = payload["urls"]
+        else:
+            raise RuntimeError(
+                "Candidate JSON object must contain a list under 'candidates' or 'urls'."
+            )
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        raise RuntimeError("Candidate JSON must be a list, or an object with 'candidates' or 'urls'.")
+
+    candidates: list[PublicCandidate] = []
+    for index, entry in enumerate(entries, start=1):
+        document_name: str | None = None
+        document_id: str | None = None
+        if isinstance(entry, str):
+            url = entry.strip()
+        elif isinstance(entry, dict):
+            raw_url = entry.get("url") or entry.get("link")
+            if not isinstance(raw_url, str):
+                raise RuntimeError(f"Candidate JSON entry {index} is missing a string 'url' field.")
+            url = raw_url.strip()
+            raw_name = entry.get("document_name") or entry.get("name")
+            if isinstance(raw_name, str) and raw_name.strip():
+                document_name = raw_name.strip()
+            raw_document_id = entry.get("document_id")
+            if isinstance(raw_document_id, str) and raw_document_id.strip():
+                document_id = raw_document_id.strip()
+        else:
+            raise RuntimeError(f"Candidate JSON entry {index} must be a URL string or object.")
+
+        if not url:
+            raise RuntimeError(f"Candidate JSON entry {index} has an empty URL.")
+        if "/documents/" not in url:
+            raise RuntimeError(f"Candidate JSON entry {index} is not an Onshape document URL: {url}")
+        candidates.append(
+            PublicCandidate(url=url, document_name=document_name, document_id=document_id)
+        )
+
+    if not candidates:
+        raise RuntimeError(f"Candidate JSON file contains no candidates: {path}")
+    return candidates
+
+
 def main() -> int:
     load_dotenv(dotenv_path=Path.cwd() / ".env")
     args = build_arg_parser().parse_args()
     configure_logging(verbose=args.verbose)
+    if args.debug_one_url and args.candidates_json:
+        print(
+            "--debug-one-url and --candidates-json cannot be used together.",
+            file=sys.stderr,
+        )
+        return 2
     missing = [
         name
         for name in ("ONSHAPE_EMAIL", "ONSHAPE_PASSWORD")
