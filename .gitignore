@@ -2,7 +2,8 @@
 outputs/
 !outputs/results/.gitkeep
 !outputs/screenshots/.gitkeep
-__pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+.idea/
