@@ -50,13 +50,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--candidates-json",
         "--candidate-json",
         type=Path,
-        default=None,
+        default=Path("outputs/candidates.json"),
         help="Optional JSON file containing candidate Onshape document or Part Studio URLs.",
     )
     parser.add_argument("--headless", type=_parse_bool, default=False)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/results"))
     parser.add_argument("--timeout-ms", type=int, default=30_000)
-    parser.add_argument("--min-active-feature-count", type=int, default=1)
+    parser.add_argument("--min-active-feature-count", type=int, default=5)
     parser.add_argument("--allow-suppressed-unsupported", type=_parse_bool, default=True)
     parser.add_argument("--inspect-multiple-part-studios", type=_parse_bool, default=False)
     parser.add_argument("--max-part-studios-per-document", type=int, default=1)
