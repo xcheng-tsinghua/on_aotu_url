@@ -192,7 +192,7 @@ async def run(args: argparse.Namespace) -> int:
                 await client.open_public_page()
                 added = queue.add_candidates(
                     await client.read_visible_public_candidates(),
-                    max_buffer=max_candidates_buffer,
+                    max_buffer=args.max_candidates_buffer,
                 )
                 if added:
                     no_new_scrolls = 0
