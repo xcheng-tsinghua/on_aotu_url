@@ -50,7 +50,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--candidates-json",
         "--candidate-json",
         type=Path,
-        default=Path("outputs/candidates.json"),
+        default=None,
         help="Optional JSON file containing candidate Onshape document or Part Studio URLs.",
     )
     parser.add_argument("--headless", type=_parse_bool, default=False)
