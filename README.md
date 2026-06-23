@@ -88,7 +88,11 @@ Later runs reuse that local profile and can usually skip login. Keep this direct
 ```bash
 python -m src.main --target-inspected-count 0 --max-scrolls 0 --headless false --output-dir outputs/results --timeout-ms 30000 --scroll-patience 50 --resume true --min-active-feature-count 5 --allow-suppressed-unsupported true --inspect-multiple-part-studios false --max-part-studios-per-document 1 --delay-between-candidates-ms 2000
 
-python -m src.main --candidates-json candidates.json --headless false --output-dir outputs/results
+
+python -m src.main --candidates-json outputs/candidates.json
+
+python -m src.main
+
 
 ```
 
