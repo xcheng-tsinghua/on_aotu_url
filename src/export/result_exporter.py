@@ -19,6 +19,7 @@ class ResultExporter:
         *,
         results: list[CandidateResult],
         total_public_candidates_collected: int,
+        source: str = "Onshape Public list",
     ) -> dict[str, Path]:
         passed = [result for result in results if result.status == CandidateStatus.PASSED]
         rejected = [result for result in results if result.status == CandidateStatus.REJECTED]
@@ -40,6 +41,7 @@ class ResultExporter:
             paths["summary"],
             results=results,
             total_public_candidates_collected=total_public_candidates_collected,
+            source=source,
         )
         return paths
 
@@ -110,13 +112,14 @@ class ResultExporter:
         *,
         results: list[CandidateResult],
         total_public_candidates_collected: int,
+        source: str,
     ) -> None:
         total_inspected = len(results)
         num_passed = sum(1 for result in results if result.status == CandidateStatus.PASSED)
         num_rejected = sum(1 for result in results if result.status == CandidateStatus.REJECTED)
         num_uncertain = sum(1 for result in results if result.status == CandidateStatus.UNCERTAIN)
         summary: dict[str, Any] = {
-            "source": "Onshape Public list",
+            "source": source,
             "total_public_candidates_collected": total_public_candidates_collected,
             "total_inspected": total_inspected,
             "num_passed": num_passed,

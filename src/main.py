@@ -32,23 +32,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-inspected-count",
         type=int,
-        default=100,
-        help="Number of validation results to produce in this run.",
+        default=0,
+        help="Number of validation results to produce in this run. Use 0 for no count limit.",
     )
-    parser.add_argument(
-        "--max-candidates",
-        type=int,
-        default=None,
-        help="Deprecated compatibility alias for --max-candidates-buffer.",
-    )
-    parser.add_argument("--max-candidates-buffer", type=int, default=1000)
-    parser.add_argument("--max-scrolls", type=int, default=300)
-    parser.add_argument("--scroll-patience", type=int, default=10)
+    parser.add_argument("--max-candidates-buffer", type=int, default=5000)
+    parser.add_argument("--max-scrolls", type=int, default=0)
+    parser.add_argument("--scroll-patience", type=int, default=50)
     parser.add_argument("--resume", type=_parse_bool, default=True)
     parser.add_argument("--debug-one-url", type=str, default=None)
     parser.add_argument(
         "--candidates-json",
-        "--candidate-json",
         type=Path,
         default=None,
         help="Optional JSON file containing candidate Onshape document or Part Studio URLs.",
@@ -66,6 +59,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 async def run(args: argparse.Namespace) -> int:
+    file_candidates = _load_candidates_from_json(args.candidates_json) if args.candidates_json else None
     config = BrowserClientConfig(headless=args.headless, timeout_ms=args.timeout_ms)
     screenshot_dir = Path("outputs/screenshots")
     feature_artifact_dir = args.output_dir / "feature_artifacts"
@@ -76,12 +70,6 @@ async def run(args: argparse.Namespace) -> int:
     key_mode = "element" if args.candidates_json else "document"
     inspected_before_run = {candidate_key(result.url, key_mode=key_mode) for result in existing_results}
     total_public_candidates_collected = 0
-
-    if args.max_candidates is not None:
-        LOGGER.warning(
-            "--max-candidates is deprecated; treating it as --max-candidates-buffer for this run."
-        )
-    max_candidates_buffer = args.max_candidates or args.max_candidates_buffer
 
     async with BrowserOnshapeClient(config) as client:
         await client.ensure_logged_in()
@@ -99,13 +87,18 @@ async def run(args: argparse.Namespace) -> int:
             )
             results.extend(debug_results)
             total_public_candidates_collected = 1
-            exporter.export(results=results, total_public_candidates_collected=1)
+            exporter.export(
+                results=results,
+                total_public_candidates_collected=1,
+                source="Debug URL",
+            )
             for result in debug_results:
                 print(json.dumps(result.to_output_dict(), ensure_ascii=False, indent=2))
             return 0
 
         if args.candidates_json:
-            file_candidates = _load_candidates_from_json(args.candidates_json)
+            if file_candidates is None:
+                raise RuntimeError("Candidate JSON loading failed unexpectedly.")
             queue = CandidateQueue(already_inspected_keys=inspected_before_run, key_mode="element")
             added = queue.add_candidates(file_candidates, max_buffer=len(file_candidates))
             total_public_candidates_collected = len(file_candidates)
@@ -155,6 +148,7 @@ async def run(args: argparse.Namespace) -> int:
                     exporter.export(
                         results=results,
                         total_public_candidates_collected=total_public_candidates_collected,
+                        source=f"Candidate JSON: {args.candidates_json}",
                     )
                     LOGGER.info(
                         "Incrementally saved JSON-file result %s/%s for %s: %s.",
@@ -170,6 +164,7 @@ async def run(args: argparse.Namespace) -> int:
             paths = exporter.export(
                 results=results,
                 total_public_candidates_collected=total_public_candidates_collected,
+                source=f"Candidate JSON: {args.candidates_json}",
             )
             for name, path in paths.items():
                 LOGGER.info("Wrote %s to %s", name, path)
@@ -185,7 +180,7 @@ async def run(args: argparse.Namespace) -> int:
 
         visible_added = queue.add_candidates(
             await client.read_visible_public_candidates(),
-            max_buffer=max_candidates_buffer,
+            max_buffer=args.max_candidates_buffer,
         )
         LOGGER.info("Added %s visible Public candidates to the inspection queue.", visible_added)
 
@@ -204,15 +199,15 @@ async def run(args: argparse.Namespace) -> int:
 
                 while (
                     queue.pending_count == 0
-                    and scrolls_used < args.max_scrolls
-                    and no_new_scrolls < args.scroll_patience
+                    and _has_scroll_budget(scrolls_used, args.max_scrolls)
+                    and _has_patience_budget(no_new_scrolls, args.scroll_patience)
                 ):
                     changed = await client.scroll_public_list_once()
                     scrolls_used += 1
                     await asyncio.sleep(1.0)
                     added = queue.add_candidates(
                         await client.read_visible_public_candidates(),
-                        max_buffer=max_candidates_buffer,
+                        max_buffer=args.max_candidates_buffer,
                     )
                     if added:
                         LOGGER.info(
@@ -269,6 +264,7 @@ async def run(args: argparse.Namespace) -> int:
                 exporter.export(
                     results=results,
                     total_public_candidates_collected=queue.unique_seen_count,
+                    source="Onshape Public list",
                 )
                 LOGGER.info(
                     "Incrementally saved result %s/%s for %s: %s.",
@@ -286,6 +282,7 @@ async def run(args: argparse.Namespace) -> int:
     paths = exporter.export(
         results=results,
         total_public_candidates_collected=total_public_candidates_collected,
+        source="Onshape Public list",
     )
     for name, path in paths.items():
         LOGGER.info("Wrote %s to %s", name, path)
@@ -457,7 +454,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    return asyncio.run(run(args))
+    try:
+        return asyncio.run(run(args))
+    except RuntimeError as exc:
+        if args.candidates_json and str(exc).startswith("Candidate JSON"):
+            print(str(exc), file=sys.stderr)
+            return 2
+        raise
 
 
 def _parse_bool(value: str | bool) -> bool:
@@ -469,6 +472,18 @@ def _parse_bool(value: str | bool) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError(f"Expected true or false, got {value!r}")
+
+
+def _has_scroll_budget(scrolls_used: int, max_scrolls: int) -> bool:
+    if max_scrolls <= 0:
+        return True
+    return scrolls_used < max_scrolls
+
+
+def _has_patience_budget(no_new_scrolls: int, scroll_patience: int) -> bool:
+    if scroll_patience <= 0:
+        return True
+    return no_new_scrolls < scroll_patience
 
 
 if __name__ == "__main__":

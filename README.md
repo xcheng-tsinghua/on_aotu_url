@@ -68,7 +68,7 @@ python -m src.main --target-inspected-count 100 --headless false --max-scrolls 3
 Run from a local candidate-link JSON file instead of the Public tab:
 
 ```bash
-python -m src.main --candidates-json candidates.json --target-inspected-count 100 --headless false --output-dir outputs/results
+python -m src.main --candidates-json candidates.json --headless false --output-dir outputs/results
 ```
 
 If the persistent browser profile is already logged in, the tool skips credential entry. Otherwise it opens the Onshape sign-in page, fills `ONSHAPE_EMAIL` and `ONSHAPE_PASSWORD`, submits the login form, and waits for the documents page to load.
@@ -86,19 +86,18 @@ Later runs reuse that local profile and can usually skip login. Keep this direct
 ## CLI
 
 ```bash
-python -m src.main --target-inspected-count 200 --max-scrolls 500 --headless false --output-dir outputs/results --timeout-ms 30000 --scroll-patience 10 --resume true --min-active-feature-count 1 --allow-suppressed-unsupported true --inspect-multiple-part-studios false --max-part-studios-per-document 1 --delay-between-candidates-ms 2000
+python -m src.main --target-inspected-count 0 --max-scrolls 0 --headless false --output-dir outputs/results --timeout-ms 30000 --scroll-patience 50 --resume true --min-active-feature-count 5 --allow-suppressed-unsupported true --inspect-multiple-part-studios false --max-part-studios-per-document 1 --delay-between-candidates-ms 2000
 
-python -m src.main --candidates-json candidates.json --target-inspected-count 100 --headless false --output-dir outputs/results
+python -m src.main --candidates-json candidates.json --headless false --output-dir outputs/results
 
 ```
 
 Arguments:
 
-- `--target-inspected-count`: number of validation results to produce in this run; this includes `passed`, `rejected`, and `uncertain`.
-- `--max-candidates-buffer`: maximum uninspected candidate links to keep in memory.
-- `--max-candidates`: deprecated compatibility alias for `--max-candidates-buffer`.
-- `--max-scrolls`: maximum downward scroll actions in the Public list.
-- `--scroll-patience`: stop collecting after this many consecutive Public-list scrolls add no new candidates.
+- `--target-inspected-count`: number of validation results to produce in this run; this includes `passed`, `rejected`, and `uncertain`. The default `0` means no count limit.
+- `--max-candidates-buffer`: maximum uninspected Public-list candidate links to keep in memory.
+- `--max-scrolls`: maximum downward scroll actions in the Public list. The default `0` means no scroll count limit.
+- `--scroll-patience`: stop collecting after this many consecutive Public-list scrolls add no new candidates. Set `0` to disable this stop condition.
 - `--resume`: when true, load previous output JSON files and skip already inspected URLs.
 - `--debug-one-url`: inspect one Onshape document URL, save feature-tree artifacts, evaluate it, and print the result.
 - `--candidates-json`: read candidate document or Part Studio links from a JSON file after login, instead of opening the Public tab.
@@ -110,6 +109,14 @@ Arguments:
 - `--inspect-multiple-part-studios`: inspect more than the first Part Studio.
 - `--max-part-studios-per-document`: cap Part Studios inspected per document.
 - `--delay-between-candidates-ms`: polite delay between candidate documents.
+
+For a long JSON-file run, the shortest command is:
+
+```bash
+python -m src.main --candidates-json candidates.json --output-dir outputs/results --headless false
+```
+
+With the defaults, this runs until every uninspected candidate in the JSON file is consumed. For a long Public-list run, omit `--candidates-json`; the default `--target-inspected-count 0` keeps validating until Public collection is exhausted by the scroll/patience settings.
 
 ## Rule Logic
 

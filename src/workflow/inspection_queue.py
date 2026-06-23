@@ -96,4 +96,6 @@ def inspected_count(results_count_this_run: int) -> int:
 
 
 def should_continue_inspecting(*, inspected_this_run: int, target_inspected_count: int) -> bool:
+    if target_inspected_count <= 0:
+        return True
     return inspected_this_run < target_inspected_count

@@ -9,6 +9,8 @@ from src.workflow.inspection_queue import (
 
 
 def test_target_inspected_count_stopping_logic() -> None:
+    assert should_continue_inspecting(inspected_this_run=1000, target_inspected_count=0)
+    assert should_continue_inspecting(inspected_this_run=1000, target_inspected_count=-1)
     assert should_continue_inspecting(inspected_this_run=0, target_inspected_count=2)
     assert should_continue_inspecting(inspected_this_run=1, target_inspected_count=2)
     assert not should_continue_inspecting(inspected_this_run=2, target_inspected_count=2)
