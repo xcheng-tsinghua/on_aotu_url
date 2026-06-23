@@ -50,7 +50,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/results"))
     parser.add_argument("--timeout-ms", type=int, default=30_000)
     parser.add_argument("--min-active-feature-count", type=int, default=5)
-    parser.add_argument("--allow-suppressed-unsupported", type=_parse_bool, default=True)
+    parser.add_argument("--allow-suppressed-unsupported", type=_parse_bool, default=False)
     parser.add_argument("--inspect-multiple-part-studios", type=_parse_bool, default=False)
     parser.add_argument("--max-part-studios-per-document", type=int, default=1)
     parser.add_argument("--delay-between-candidates-ms", type=int, default=2000)
