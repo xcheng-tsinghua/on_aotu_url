@@ -126,6 +126,33 @@ def test_unreliable_extraction_marks_candidate_uncertain() -> None:
     assert "Feature tree extraction unreliable" in result.reason
 
 
+def test_feature_tree_folders_reject_even_when_features_are_allowed() -> None:
+    result = evaluate_candidate_features(
+        url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element1",
+        features=[feature("Sketch", index=1), feature("Extrude", index=2)],
+        feature_folders=["Base (8)", "Driven Gear (6)"],
+    )
+
+    assert result.status == CandidateStatus.REJECTED
+    assert result.has_feature_folders is True
+    assert result.feature_folders == ["Base (8)", "Driven Gear (6)"]
+    assert "feature tree contains folders" in result.reason
+
+
+def test_feature_tree_folders_reject_before_unreliable_extraction() -> None:
+    result = evaluate_candidate_features(
+        url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element1",
+        features=[],
+        extraction_reliable=False,
+        extraction_warnings=["Feature tree extraction incomplete."],
+        feature_folders=["Base (8)"],
+    )
+
+    assert result.status == CandidateStatus.REJECTED
+    assert result.has_feature_folders is True
+    assert result.reason == "feature tree contains folders: Base (8)"
+
+
 def test_min_active_feature_count_rejects_reliable_empty_models() -> None:
     result = evaluate_candidate_features(
         url="https://cad.onshape.com/documents/doc1",

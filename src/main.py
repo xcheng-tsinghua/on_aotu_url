@@ -259,17 +259,18 @@ async def _inspect_candidate(
             warnings=warnings,
         )
         result = evaluate_candidate_features(
-            url=candidate.url,
-            document_name=candidate.document_name,
+            url=inspection.candidate.url,
+            document_name=inspection.candidate.document_name,
             part_studio_name=inspection.part_studio_name,
             features=parse_result.features,
             extraction_reliable=not warnings,
             extraction_warnings=warnings,
             screenshot_path=inspection.screenshot_path,
+            feature_folders=inspection.feature_folders,
             min_active_feature_count=args.min_active_feature_count,
             allow_suppressed_unsupported=args.allow_suppressed_unsupported,
         )
-        LOGGER.info("Result for %s: %s - %s", candidate.url, result.status.value, result.reason)
+        LOGGER.info("Result for %s: %s - %s", inspection.candidate.url, result.status.value, result.reason)
         results.append(result)
     return results
 
@@ -290,6 +291,7 @@ def _write_extracted_features_json(
         "document_name": inspection.candidate.document_name,
         "part_studio_name": inspection.part_studio_name,
         "feature_count": len(features),
+        "feature_folders": inspection.feature_folders,
         "warnings": warnings,
         "feature_tree_before_screenshot_path": inspection.feature_tree_before_screenshot_path,
         "feature_tree_after_screenshot_path": inspection.feature_tree_after_screenshot_path,

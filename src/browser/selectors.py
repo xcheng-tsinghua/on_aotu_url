@@ -95,6 +95,15 @@ FEATURE_TREE_ITEM_SELECTORS = (
     '[class*="featureTree"] [class*="feature"]',
 )
 
+FEATURE_TREE_FOLDER_ROW_SELECTORS = (
+    "#feature-list .os-list-item",
+    "#feature-list-container .os-list-item",
+    '[data-testid*="feature-tree"] [role="treeitem"]',
+    '[class*="feature-tree"] [role="treeitem"]',
+    '[class*="featureTree"] [role="treeitem"]',
+    '[role="tree"] [role="treeitem"]',
+)
+
 FEATURE_TREE_SCROLL_CONTAINER_SELECTORS = (
     "#feature-list .pane-section-scroll-container",
     "#feature-list-container .pane-section-scroll-container",

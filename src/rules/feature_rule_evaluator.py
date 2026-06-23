@@ -20,12 +20,14 @@ def evaluate_candidate_features(
     extraction_reliable: bool = True,
     extraction_warnings: list[str] | None = None,
     screenshot_path: str | None = None,
+    feature_folders: list[str] | None = None,
     min_active_feature_count: int = 1,
     allow_suppressed_unsupported: bool = True,
 ) -> CandidateResult:
     """Evaluate an Onshape Part Studio feature list with deterministic rules."""
 
     warnings = extraction_warnings or []
+    detected_feature_folders = feature_folders or []
     histogram = _empty_histogram()
     active_unsupported: list[UnsupportedFeature] = []
     suppressed_unsupported: list[UnsupportedFeature] = []
@@ -34,6 +36,24 @@ def evaluate_candidate_features(
     has_active_import = False
     has_active_derived = False
     has_active_error = False
+
+    if detected_feature_folders:
+        return _result(
+            url=url,
+            document_name=document_name,
+            part_studio_name=part_studio_name,
+            status=CandidateStatus.REJECTED,
+            reason="feature tree contains folders: " + ", ".join(detected_feature_folders),
+            histogram=histogram,
+            active_unsupported=active_unsupported,
+            suppressed_unsupported=suppressed_unsupported,
+            has_active_import=False,
+            has_active_derived=False,
+            has_active_error=False,
+            has_feature_folders=True,
+            feature_folders=detected_feature_folders,
+            screenshot_path=screenshot_path,
+        )
 
     if not extraction_reliable:
         return _result(
@@ -48,6 +68,8 @@ def evaluate_candidate_features(
             has_active_import=False,
             has_active_derived=False,
             has_active_error=False,
+            has_feature_folders=False,
+            feature_folders=detected_feature_folders,
             screenshot_path=screenshot_path,
         )
 
@@ -66,6 +88,8 @@ def evaluate_candidate_features(
             has_active_import=False,
             has_active_derived=False,
             has_active_error=False,
+            has_feature_folders=False,
+            feature_folders=detected_feature_folders,
             screenshot_path=screenshot_path,
         )
 
@@ -126,6 +150,8 @@ def evaluate_candidate_features(
             has_active_import=has_active_import,
             has_active_derived=has_active_derived,
             has_active_error=has_active_error,
+            has_feature_folders=False,
+            feature_folders=detected_feature_folders,
             screenshot_path=screenshot_path,
         )
 
@@ -141,6 +167,8 @@ def evaluate_candidate_features(
         has_active_import=has_active_import,
         has_active_derived=has_active_derived,
         has_active_error=has_active_error,
+        has_feature_folders=False,
+        feature_folders=detected_feature_folders,
         screenshot_path=screenshot_path,
     )
 
@@ -191,6 +219,8 @@ def _result(
     has_active_import: bool,
     has_active_derived: bool,
     has_active_error: bool,
+    has_feature_folders: bool,
+    feature_folders: list[str],
     screenshot_path: str | None,
 ) -> CandidateResult:
     return CandidateResult(
@@ -205,5 +235,7 @@ def _result(
         has_active_import=has_active_import,
         has_active_derived=has_active_derived,
         has_active_error=has_active_error,
+        has_feature_folders=has_feature_folders,
+        feature_folders=feature_folders,
         screenshot_path=screenshot_path,
     )

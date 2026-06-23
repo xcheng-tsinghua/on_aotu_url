@@ -11,10 +11,11 @@ Browser-automation tool for collecting high-quality public CAD models from the O
 5. Navigates to the Onshape Public documents area.
 6. Scrolls the public model list to maintain a deduplicated candidate queue.
 7. Opens candidates until the target inspected count is reached.
-8. Scrolls each Part Studio feature tree panel to collect all feature rows.
-9. Parses feature rows into structured records.
-10. Applies deterministic whitelist/rejection rules.
-11. Writes passed, rejected, uncertain, CSV, feature artifacts, and summary reports incrementally.
+8. Records the opened Part Studio URL after Onshape fills the element id (`/e/...`).
+9. Scrolls each Part Studio feature tree panel to collect all feature rows.
+10. Parses feature rows into structured records.
+11. Applies deterministic whitelist/rejection rules.
+12. Writes passed, rejected, uncertain, CSV, feature artifacts, and summary reports incrementally.
 
 ## Why Browser Automation
 
@@ -121,6 +122,8 @@ Reject when an active, unsuppressed feature is:
 - outside the whitelist
 - marked with an error or failed regeneration status
 
+Reject when the Part Studio feature tree contains feature folders, because collapsed folders can hide features that are not reliably extracted from the visible tree.
+
 Suppressed unsupported features are recorded in the output. By default, they do not reject a model because they do not affect the final model.
 
 If the feature tree cannot be extracted completely, or suppression status cannot be determined reliably, the candidate is marked `uncertain`, not `passed`.
@@ -134,6 +137,8 @@ Reports are written to `outputs/results` by default:
 - `uncertain_candidates.json`
 - `all_candidates.csv`
 - `summary.json`
+
+Candidate URLs are recorded from the opened Part Studio page, so successful browser loads include the document id, workspace id, and element id (`/documents/{did}/w/{wid}/e/{eid}`).
 
 Screenshots are written to `outputs/screenshots`.
 
@@ -175,6 +180,7 @@ If collection or feature extraction stops working, update:
 - `PUBLIC_LIST_CONTAINER_SELECTORS`
 - `PART_STUDIO_TAB_SELECTORS`
 - `FEATURE_TREE_ITEM_SELECTORS`
+- `FEATURE_TREE_FOLDER_ROW_SELECTORS`
 
 If your Onshape account has a stable Public documents URL, set `ONSHAPE_PUBLIC_URL` and the tool will navigate directly to it.
 

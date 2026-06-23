@@ -81,6 +81,8 @@ class CandidateResult(BaseModel):
     has_active_import: bool = False
     has_active_derived: bool = False
     has_active_error: bool = False
+    has_feature_folders: bool = False
+    feature_folders: list[str] = Field(default_factory=list)
     screenshot_path: str | None = None
 
     def to_output_dict(self) -> dict[str, Any]:

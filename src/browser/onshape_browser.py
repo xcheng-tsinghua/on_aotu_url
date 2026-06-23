@@ -35,6 +35,7 @@ class FeatureTreeInspection:
     candidate: PublicCandidate
     part_studio_name: str | None
     raw_feature_items: list[dict[str, Any]]
+    feature_folders: list[str]
     screenshot_path: str | None
     warnings: list[str]
     feature_tree_before_screenshot_path: str | None = None
@@ -45,6 +46,7 @@ class FeatureTreeInspection:
 @dataclass(slots=True)
 class FeatureTreeExtraction:
     raw_feature_items: list[dict[str, Any]]
+    feature_folders: list[str]
     warnings: list[str]
     before_screenshot_path: str | None = None
     after_screenshot_path: str | None = None
@@ -264,6 +266,7 @@ class BrowserOnshapeClient:
         LOGGER.info("Inspecting Onshape candidate: %s", candidate.url)
         await page.goto(candidate.url, wait_until="domcontentloaded")
         await self._wait_for_model_surface()
+        candidate = self._candidate_from_current_page(candidate)
 
         part_locator, part_count = await self._find_part_studio_locator()
         if part_locator is None or part_count == 0:
@@ -288,6 +291,7 @@ class BrowserOnshapeClient:
                     candidate=candidate,
                     part_studio_name=None,
                     raw_feature_items=extraction.raw_feature_items,
+                    feature_folders=extraction.feature_folders,
                     screenshot_path=screenshot_path,
                     warnings=extraction.warnings if extraction.raw_feature_items else [warning, *extraction.warnings],
                     feature_tree_before_screenshot_path=extraction.before_screenshot_path,
@@ -316,16 +320,17 @@ class BrowserOnshapeClient:
             except Exception as exc:  # pragma: no cover - UI-specific fallback
                 LOGGER.warning("Could not activate Part Studio tab %s: %s", part_index + 1, exc)
 
+            active_candidate = self._candidate_from_current_page(candidate)
             screenshot_path = await self._take_candidate_screenshot(
                 screenshot_dir=screenshot_dir,
-                candidate=candidate,
+                candidate=active_candidate,
                 candidate_index=candidate_index,
                 part_index=part_index + 1,
             )
             extraction = await self.extract_feature_tree(
                 artifact_prefix=self._feature_artifact_prefix(
                     artifact_dir=artifact_dir,
-                    candidate=candidate,
+                    candidate=active_candidate,
                     candidate_index=candidate_index,
                     part_index=part_index + 1,
                 )
@@ -336,16 +341,17 @@ class BrowserOnshapeClient:
             ]
             inspections.append(
                 FeatureTreeInspection(
-                    candidate=candidate,
+                    candidate=active_candidate,
                     part_studio_name=part_studio_name,
                     raw_feature_items=extraction.raw_feature_items,
+                    feature_folders=extraction.feature_folders,
                     screenshot_path=screenshot_path,
                     warnings=warnings,
                     feature_tree_before_screenshot_path=extraction.before_screenshot_path,
                     feature_tree_after_screenshot_path=extraction.after_screenshot_path,
                     extracted_features_path=self._extracted_features_path(
                         artifact_dir=artifact_dir,
-                        candidate=candidate,
+                        candidate=active_candidate,
                         candidate_index=candidate_index,
                         part_index=part_index + 1,
                     ),
@@ -378,6 +384,7 @@ class BrowserOnshapeClient:
             )
             return FeatureTreeExtraction(
                 raw_feature_items=await self._read_visible_feature_tree_items(max_items=max_items),
+                feature_folders=await self._read_visible_feature_tree_folders(),
                 warnings=warnings,
             )
 
@@ -399,11 +406,13 @@ class BrowserOnshapeClient:
             )
 
         seen: dict[str, dict[str, Any]] = {}
+        folder_seen: dict[str, str] = {}
         no_new_steps = 0
         reached_bottom = False
 
         for _ in range(max_scroll_steps):
             visible_items = await self._read_visible_feature_tree_items(max_items=max_items)
+            visible_folders = await self._read_visible_feature_tree_folders()
             added = 0
             for item in visible_items:
                 key = _feature_row_key(item)
@@ -412,6 +421,13 @@ class BrowserOnshapeClient:
                 item["extraction_order"] = len(seen) + 1
                 seen[key] = item
                 added += 1
+            folder_added = 0
+            for folder_name in visible_folders:
+                key = _folder_row_key(folder_name)
+                if key in folder_seen:
+                    continue
+                folder_seen[key] = folder_name
+                folder_added += 1
 
             if len(seen) >= max_items:
                 warnings.append(f"Stopped feature extraction after reaching max_items={max_items}.")
@@ -433,7 +449,7 @@ class BrowserOnshapeClient:
             if reached_bottom:
                 break
 
-            no_new_steps = 0 if added else no_new_steps + 1
+            no_new_steps = 0 if added or folder_added else no_new_steps + 1
             if no_new_steps >= scroll_patience:
                 warnings.append(
                     "Feature tree scrolling stopped before reaching the bottom after repeated scrolls "
@@ -494,9 +510,15 @@ class BrowserOnshapeClient:
             )
 
         items = sorted(seen.values(), key=lambda item: int(item.get("extraction_order") or 0))
-        LOGGER.info("Extracted %s feature tree rows after scrolling.", len(items))
+        feature_folders = list(folder_seen.values())
+        LOGGER.info(
+            "Extracted %s feature tree rows and detected %s feature folders after scrolling.",
+            len(items),
+            len(feature_folders),
+        )
         return FeatureTreeExtraction(
             raw_feature_items=items,
+            feature_folders=feature_folders,
             warnings=warnings,
             before_screenshot_path=before_screenshot_path,
             after_screenshot_path=after_screenshot_path,
@@ -555,6 +577,80 @@ class BrowserOnshapeClient:
             if items:
                 LOGGER.info("Extracted %s feature tree rows with selector: %s", len(items), selector)
                 return items
+        return []
+
+    async def _read_visible_feature_tree_folders(self) -> list[str]:
+        page = self._require_page()
+        for selector in selectors.FEATURE_TREE_FOLDER_ROW_SELECTORS:
+            locator = page.locator(selector)
+            try:
+                count = await locator.count()
+            except Exception:  # pragma: no cover - UI-specific fallback
+                continue
+            if count == 0:
+                continue
+
+            folders: list[str] = []
+            for index in range(min(count, 300)):
+                row = locator.nth(index)
+                try:
+                    folder_name = await row.evaluate(
+                        """
+                        (el) => {
+                          const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                          if (!text || /^Default geometry$/i.test(text) || /^Features\\s*\\(/i.test(text)) {
+                            return '';
+                          }
+                          if (/^Parts\\s*\\(/i.test(text)) {
+                            return '';
+                          }
+
+                          const classText = el.getAttribute('class') || '';
+                          const childHints = Array.from(
+                            el.querySelectorAll('[aria-label], [title], [class], svg, use')
+                          ).map((child) => [
+                            child.getAttribute('aria-label') || '',
+                            child.getAttribute('title') || '',
+                            child.getAttribute('class') || '',
+                            child.getAttribute('href') || '',
+                            child.getAttribute('xlink:href') || ''
+                          ].join(' ')).join(' ').toLowerCase();
+                          const rowHints = [
+                            classText,
+                            el.getAttribute('aria-label') || '',
+                            el.getAttribute('title') || '',
+                            childHints
+                          ].join(' ').toLowerCase();
+
+                          const hasCountSuffix = /\\(\\d+\\)$/.test(text);
+                          const hasFolderHint = rowHints.includes('folder') || rowHints.includes('#svg-icon-folder');
+                          const expandable =
+                            el.hasAttribute('aria-expanded') ||
+                            !!el.querySelector('[aria-expanded]') ||
+                            rowHints.includes('expand') ||
+                            rowHints.includes('collapse');
+
+                          if (hasFolderHint && hasCountSuffix) {
+                            return text;
+                          }
+                          if (/\\bns-user-feature\\b|\\bns-default-feature\\b/.test(classText)) {
+                            return '';
+                          }
+                          if (expandable && hasCountSuffix) {
+                            return text;
+                          }
+                          return '';
+                        }
+                        """
+                    )
+                except Exception as exc:  # pragma: no cover - UI-specific fallback
+                    LOGGER.debug("Could not read feature folder row %s: %s", index + 1, exc)
+                    continue
+                if isinstance(folder_name, str) and folder_name.strip():
+                    folders.append(folder_name.strip())
+            if folders:
+                LOGGER.info("Detected %s visible feature folders with selector: %s", len(folders), selector)
+                return folders
         return []
 
     async def _read_visible_document_links(self) -> list[PublicCandidate]:
@@ -873,6 +969,18 @@ class BrowserOnshapeClient:
             return ""
         return re.sub(r"\s+", " ", str(text)).strip().lower()
 
+    def _candidate_from_current_page(self, candidate: PublicCandidate) -> PublicCandidate:
+        page = self._require_page()
+        current_url = _normalize_url(page.url)
+        if not _document_id(current_url):
+            return candidate
+        return candidate.model_copy(
+            update={
+                "url": current_url,
+                "document_id": candidate.document_id or _document_id(current_url),
+            }
+        )
+
     async def _wait_for_first_visible_locator(
         self,
         selector_values: tuple[str, ...],
@@ -926,3 +1034,8 @@ def _feature_row_key(item: dict[str, Any]) -> str:
             return f"{key}:{value}"
     text = re.sub(r"\s+", " ", str(item.get("raw_text") or "")).strip().lower()
     return f"text:{text}"
+
+
+def _folder_row_key(folder_name: str) -> str:
+    text = re.sub(r"\s+", " ", folder_name).strip().lower()
+    return f"folder:{text}"

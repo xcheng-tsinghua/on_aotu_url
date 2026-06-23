@@ -83,6 +83,8 @@ class ResultExporter:
             "has_active_import",
             "has_active_derived",
             "has_active_error",
+            "has_feature_folders",
+            "feature_folders",
             "screenshot_path",
         ]
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -99,6 +101,7 @@ class ResultExporter:
                 row["suppressed_unsupported_features"] = json.dumps(
                     row["suppressed_unsupported_features"], ensure_ascii=False
                 )
+                row["feature_folders"] = json.dumps(row["feature_folders"], ensure_ascii=False)
                 writer.writerow(row)
 
     def _write_summary(
