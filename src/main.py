@@ -18,7 +18,7 @@ from src.rules.feature_rule_evaluator import evaluate_candidate_features
 from src.utils.logging_utils import configure_logging
 from src.workflow.inspection_queue import (
     CandidateQueue,
-    candidate_key,
+    candidate_resume_keys,
     should_continue_inspecting,
 )
 
@@ -38,7 +38,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates-buffer", type=int, default=5000)
     parser.add_argument("--max-scrolls", type=int, default=0)
     parser.add_argument("--scroll-patience", type=int, default=50)
-    parser.add_argument("--resume", type=_parse_bool, default=True)
+    parser.add_argument(
+        "--resume",
+        type=_parse_bool,
+        default=True,
+        help="Continue from existing output JSON files and skip already inspected candidates.",
+    )
     parser.add_argument("--debug-one-url", type=str, default=None)
     parser.add_argument(
         "--candidates-json",
@@ -68,7 +73,11 @@ async def run(args: argparse.Namespace) -> int:
     existing_results = exporter.load_existing_results() if args.resume else []
     results: list[CandidateResult] = list(existing_results)
     key_mode = "element" if args.candidates_json else "document"
-    inspected_before_run = {candidate_key(result.url, key_mode=key_mode) for result in existing_results}
+    inspected_before_run = {
+        key
+        for result in existing_results
+        for key in candidate_resume_keys(result.url, key_mode=key_mode)
+    }
     total_public_candidates_collected = 0
 
     async with BrowserOnshapeClient(config) as client:

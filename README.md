@@ -102,7 +102,7 @@ Arguments:
 - `--max-candidates-buffer`: maximum uninspected Public-list candidate links to keep in memory.
 - `--max-scrolls`: maximum downward scroll actions in the Public list. The default `0` means no scroll count limit.
 - `--scroll-patience`: stop collecting after this many consecutive Public-list scrolls add no new candidates. Set `0` to disable this stop condition.
-- `--resume`: when true, load previous output JSON files and skip already inspected URLs.
+- `--resume`: when true, load previous output JSON files and skip already inspected candidates. This is the continue option for interrupted JSON-file runs.
 - `--debug-one-url`: inspect one Onshape document URL, save feature-tree artifacts, evaluate it, and print the result.
 - `--candidates-json`: read candidate document or Part Studio links from a JSON file after login, instead of opening the Public tab.
 - `--headless`: `true` or `false`.
@@ -121,6 +121,8 @@ python -m src.main --candidates-json candidates.json --output-dir outputs/result
 ```
 
 With the defaults, this runs until every uninspected candidate in the JSON file is consumed. For a long Public-list run, omit `--candidates-json`; the default `--target-inspected-count 0` keeps validating until Public collection is exhausted by the scroll/patience settings.
+
+If a JSON-file run is interrupted, run the same command again with the same `--output-dir`. The default `--resume true` skips candidates already written to `passed_candidates.json`, `rejected_candidates.json`, or `uncertain_candidates.json`. Use `--resume false` only when you intentionally want to start over.
 
 ## Rule Logic
 

@@ -4,6 +4,7 @@ from src.models.schemas import PublicCandidate
 from src.workflow.inspection_queue import (
     CandidateQueue,
     candidate_key,
+    candidate_resume_keys,
     should_continue_inspecting,
 )
 
@@ -88,3 +89,22 @@ def test_document_key_mode_still_dedupes_by_document() -> None:
         )
         == "element:doc1:w:workspace1:e:element1"
     )
+
+
+def test_json_resume_keys_skip_workspace_url_after_element_result() -> None:
+    inspected_keys = candidate_resume_keys(
+        "https://cad.onshape.com/documents/doc1/w/workspace1/e/element1",
+        key_mode="element",
+    )
+    queue = CandidateQueue(already_inspected_keys=inspected_keys, key_mode="element")
+
+    added = queue.add_candidates(
+        [
+            PublicCandidate(url="https://cad.onshape.com/documents/doc1/w/workspace1"),
+            PublicCandidate(url="https://cad.onshape.com/documents/doc1/w/workspace1/e/element2"),
+        ],
+        max_buffer=10,
+    )
+
+    assert added == 1
+    assert queue.next_candidate().url.endswith("/element2")

@@ -91,6 +91,25 @@ def candidate_key(candidate_or_url: PublicCandidate | str, *, key_mode: str = "d
     return f"url:{stable}"
 
 
+def candidate_resume_keys(candidate_or_url: PublicCandidate | str, *, key_mode: str = "document") -> set[str]:
+    key = candidate_key(candidate_or_url, key_mode=key_mode)
+    if key_mode != "element":
+        return {key}
+
+    url = candidate_or_url.url if isinstance(candidate_or_url, PublicCandidate) else candidate_or_url
+    keys = {key}
+    match = DOCUMENT_WORKSPACE_ELEMENT_RE.search(url)
+    if not match:
+        return keys
+
+    document, workspace, _element = match.groups()
+    if document:
+        keys.add(f"document:{document}")
+    if document and workspace:
+        keys.add(f"workspace:{document}:w:{workspace}")
+    return keys
+
+
 def inspected_count(results_count_this_run: int) -> int:
     return results_count_this_run
 
