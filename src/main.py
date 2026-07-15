@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -450,23 +449,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    missing = [
-        name
-        for name in ("ONSHAPE_EMAIL", "ONSHAPE_PASSWORD")
-        if not os.getenv(name)
-    ]
-    if missing:
-        print(
-            "Missing required environment variables: "
-            + ", ".join(missing)
-            + ". Add them to .env or your shell environment.",
-            file=sys.stderr,
-        )
-        return 2
     try:
         return asyncio.run(run(args))
     except RuntimeError as exc:
         if args.candidates_json and str(exc).startswith("Candidate JSON"):
+            print(str(exc), file=sys.stderr)
+            return 2
+        if str(exc).startswith("Onshape is not already logged in"):
             print(str(exc), file=sys.stderr)
             return 2
         raise

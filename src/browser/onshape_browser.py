@@ -88,22 +88,33 @@ class BrowserOnshapeClient:
         await page.wait_for_load_state("domcontentloaded")
 
     async def ensure_logged_in(self) -> None:
+        page = self._require_page()
+        LOGGER.info("Checking for an existing Onshape login session.")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except Exception:  # pragma: no cover - initial blank pages may not have a load state yet
+            pass
+        if await self.is_logged_in():
+            LOGGER.info("Onshape login session detected; skipping automated login.")
+            return
+
+        await page.goto(urljoin(self.config.base_url, "/documents"), wait_until="domcontentloaded")
+        await page.wait_for_load_state("domcontentloaded")
+        await self._wait_for_auth_surface_probe(timeout_ms=min(self.config.timeout_ms, 10_000))
+        if await self.is_logged_in():
+            LOGGER.info("Onshape login session detected; skipping automated login.")
+            return
+
+        LOGGER.info("No existing Onshape login session detected; automated login is required.")
         email = os.getenv("ONSHAPE_EMAIL")
         password = os.getenv("ONSHAPE_PASSWORD")
         missing = [name for name, value in (("ONSHAPE_EMAIL", email), ("ONSHAPE_PASSWORD", password)) if not value]
         if missing:
             raise RuntimeError(
-                "Missing required environment variables: "
+                "Onshape is not already logged in, and required environment variables are missing: "
                 + ", ".join(missing)
                 + ". Add them to .env or your shell environment."
             )
-
-        page = self._require_page()
-        await page.goto(urljoin(self.config.base_url, "/documents"), wait_until="domcontentloaded")
-        await page.wait_for_load_state("domcontentloaded")
-        if await self.is_logged_in():
-            LOGGER.info("Onshape login session detected.")
-            return
 
         await self.login(email=email or "", password=password or "")
 
@@ -753,6 +764,31 @@ class BrowserOnshapeClient:
             timeout=self.config.login_timeout_ms,
         )
         await page.wait_for_load_state("domcontentloaded")
+
+    async def _wait_for_auth_surface_probe(self, timeout_ms: int) -> None:
+        page = self._require_page()
+        try:
+            await page.wait_for_function(
+                """
+                () => {
+                  const url = window.location.href.toLowerCase();
+                  const body = document.body ? document.body.innerText.toLowerCase() : "";
+                  const hasLoginField = !!document.querySelector(
+                    'input[type="email"], input[name="email"], input[name="username"], input[type="password"]'
+                  );
+                  const hasLoggedInText =
+                    body.includes("owned by me") ||
+                    body.includes("recently opened") ||
+                    body.includes("created by me") ||
+                    body.includes("public") ||
+                    body.includes("shared with me");
+                  return hasLoginField || url.includes("/signin") || url.includes("/login") || hasLoggedInText;
+                }
+                """,
+                timeout=timeout_ms,
+            )
+        except Exception as exc:  # pragma: no cover - UI-specific timing fallback
+            LOGGER.debug("Timed out while probing Onshape auth state: %s", exc)
 
     async def _wait_until_logged_in(self, timeout_ms: int) -> bool:
         page = self._require_page()
